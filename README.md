@@ -1,113 +1,138 @@
-# Telegram Private Video Downloader 📥
+# 🚀 Telegram Downloader (Videos & Documents)
 
-An automated, high-speed Python script to download videos from specific Telegram channels or chats directly to your local machine, using the official Telethon library.
+> **Developed by:** PARVEJ  
+> **License:** MIT Open Source  
+> **Language:** Python 3.8+
 
-This repository is designed to be easily cloneable, customizable, and safe (preventing sensitive credentials from leaking to public repositories).
-
----
-
-## Features
-
-- **High-Speed Decryption**: Automatically uses `cryptg` (a C-extension) to decrypt files. This yields speeds that are up to 5x-10x faster than default pure-Python decryption.
-- **Concurrently Download (Parallel)**: Downloads up to 3 videos simultaneously using an asynchronous Semaphore. This maximizes bandwidth utilization without triggering Telegram's API rate limiting (`FloodWaitError`).
-- **Live Progress Percentage**: Shows real-time progress update percentages (`10%`, `20%`, ..., `100%`) for each running download.
-- **Automatic Video Filtering**: Automatically identifies and downloads video messages from the specified target chat/channel.
-- **Sequential Scan with Limit Safety**: Scans chronological channel history (from oldest to newest) and budgets files beforehand to respect your maximum size limit (default 20 GB).
-- **Configuration Security**: Keeps secrets like Telegram credentials and sessions separate from the code using environment variables (`.env`).
-- **Resilient**: Robust logging and error handling for failed downloads.
+An advanced, beginner-friendly interactive CLI tool to download videos, documents, images, PDFs, archives, and files from Telegram private channels, groups, and public channels with live progress tracking.
 
 ---
 
-## Prerequisites
+## ✨ Features
 
-Before running the script, make sure you have:
-1. **Python 3.7 or higher** installed on your system.
-2. A **Telegram account** to authenticate the client.
-3. Your Telegram **API ID** and **API Hash**. If you don't have them:
-   - Go to [my.telegram.org](https://my.telegram.org) and log in with your phone number.
-   - Go to **API development tools**.
-   - Create a new application (fill out the form; name/short name can be anything).
-   - Copy the `api_id` and `api_hash` values.
+- 🟢 **Interactive ASCII CLI Menu**: Modern Terminal interface powered by `rich`.
+- 🔐 **Built-in Account Management**:
+  - Interactive **Telegram Login** (Phone number, OTP, and 2FA password support).
+  - **Logout Telegram** feature to clear sessions securely.
+- 📦 **Categorized Batch Download Mode**:
+  - **Private Channels**, **Private Groups**, **Public Channels**, **Public Groups**, and **Manual ID Input**.
+  - Automatic **A-Z Alphabetical Sorting** of all channels.
+  - Safe size budget calculation to prevent disk storage overflow.
+- 🔗 **Direct Link Download Modes**:
+  - **Option [3] Video Download by Link**: Download specific videos using message links.
+  - **Option [4] General File/Document Download by Link**: Download non-video files (PDF, PNG, JPG, DOCX, PPTX, TXT, ZIP, RAR, MP3, etc.).
+  - **Range Link Support**: Download ranges like `t.me/c/1234567890/10-25` or space-separated multiple links.
+- 📊 **Real-time Live Progress Bar**: Shows current queue index, filename, download speed (MB/s), completion percentage, and estimated time remaining (ETA).
+- 📂 **Automatic Download Folder**: Automatically saves all files to `C:\Users\USER\Downloads\Telegram Downloads`.
 
 ---
 
-## Quick Start Setup
+## 🛠️ Prerequisites (Prerequisite Setup)
 
-### Step 1: Clone the Repository & Install Dependencies
-First, clone the repository to your local machine and install the required library packages (which include the speed-up libraries):
+Before running the tool, make sure you have:
+
+1. **Python 3.8 or higher** installed on your system.  
+   - Download Python: [https://www.python.org/downloads/](https://www.python.org/downloads/)
+   - **Important during installation**: Check the box **"Add Python to PATH"**.
+
+---
+
+## 🔑 How to Get Your Telegram API Credentials
+
+To use Telegram API services, you need an `API_ID` and `API_HASH`:
+
+1. Open your web browser and go to [https://my.telegram.org](https://my.telegram.org).
+2. Enter your phone number with your country code (e.g., `+88017XXXXXXXX`) and click **Next**.
+3. Enter the confirmation code sent to your Telegram app.
+4. Click on **API Development Tools**.
+5. Fill in the **App title** and **Short name** (e.g., `MyDownloaderApp`).
+6. Click **Create Application**.
+7. Copy your **App api_id** (number) and **App api_hash** (string).  
+   *(Note: You will only need to enter these once in the tool or save them in a `.env` file!)*
+
+---
+
+## 📥 Beginner-Friendly Quick Start Guide
+
+### Step 1: Clone or Download the Project
+Open Terminal (Command Prompt / PowerShell) and run:
 ```bash
 git clone https://github.com/xyzbuddy/telegram-video-downloader.git
 cd telegram-video-downloader
+```
+
+### Step 2: Install Required Dependencies
+Run the following command to install the required Python packages:
+```bash
 pip install -r requirements.txt
 ```
 
-### Step 2: Set up Initial API Credentials
-Copy the template configuration file to a new file named `.env`:
-```bash
-# On Linux/macOS
-cp .env.example .env
+### Step 3: Run the Downloader
+You can launch the tool in **one click**:
 
-# On Windows (Command Prompt)
-copy .env.example .env
-
-# On Windows (PowerShell)
-Copy-Item .env.example .env
-```
-
-Open the `.env` file in a text editor and fill in your Telegram API details (leave `CHANNEL_ID` blank or as is for now):
-```ini
-API_ID=your_api_id_here
-API_HASH=your_api_hash_here
-```
-
-### Step 3: Find Channel ID & First-Time Login
-Now, run the chat lister script. This will connect to Telegram and guide you through the first-time authentication:
-```bash
-python list_chats.py
-```
-
-*During this step, the terminal will ask for your login details:*
-- **Phone Number**: Enter your phone number with your **country code** prefix included (e.g., `+88017XXXXXXXX` or `+123456789`). The country code prefix is mandatory.
-- **Login Code**: Enter the numeric login code sent to your Telegram app.
-- **2-Factor Authentication (2FA) Password**: If you have 2FA enabled on your Telegram account, the terminal will ask for your password. **Note**: As you type your password, the characters will **not be visible in the terminal** (no letters, dots, or asterisks will show) for security. Type it blindly and press Enter.
-
-Once logged in, a secure session file named `session.session` will be saved in your project folder, and the script will list all the channels and groups you belong to. Copy the ID of the channel you want to download from (usually starts with `-100`).
-
-### Step 4: Configure the Channel ID
-Open `.env` in a text editor again, and set your `CHANNEL_ID` to the copied value:
-```ini
-CHANNEL_ID=-100xxxxxxxxxx
-```
-Save and close the `.env` file.
-
-### Step 5: Start Downloading
-You are now ready to download the videos! Since you logged in during Step 3, you won't need to log in again. Simply run:
-```bash
-python downloader.py
-```
+- **On Windows**: Simply double-click **`start.bat`** (or run `.\start` in PowerShell/CMD).
+- **On Linux / Mac**: Run `python downloader.py` in your terminal.
 
 ---
 
-## Customizing Limits
+## 🎮 How to Use the Interactive Menu
 
-You can customize the maximum download size and directory inside the `.env` file:
+When you start the tool, you will see the Main Menu:
 
-- **`MAX_TOTAL_SIZE`**: The maximum limit (in bytes) of files to download in a single execution.
-  - *Example (5 GB Limit)*: `MAX_TOTAL_SIZE=5368709120` (i.e. `5 * 1024 * 1024 * 1024`)
-- **`DOWNLOADS_DIR`**: The directory name where files are saved (defaults to `downloads`).
+```text
+==================================================
+ Telegram Private Downloader
+==================================================
+Select Download Mode:
+  [1] My Account
+  [2] Download ALL videos from channel (Batch Mode)
+  [3] Download SPECIFIC video(s) by Post/Message Link
+  [4] Download SPECIFIC file(s)/document(s) by Link
+  [5] Exit
+==================================================
+Enter choice (1-5): 
+```
+
+### 1️⃣ Option [1]: My Account
+- **Telegram Login**: If you haven't logged in yet, select this option. It will ask for your `API_ID` & `API_HASH` (saved automatically to `.env`), followed by your Phone Number, OTP Code, and 2FA Password.
+- **Logout Telegram**: Safely terminates your active Telegram session after asking for confirmation (Y/N).
+
+### 2️⃣ Option [2]: Download ALL Videos from Channel (Batch Mode)
+- Choose target category: **Private Channel**, **Private Group**, **Public Channel**, **Public Group**, or **Manual ID Input**.
+- Select a channel from the alphabetically sorted A-Z list.
+- Scans messages, displays total detected videos and total size budget, and asks `Continue download? (Y/N)`.
+
+### 3️⃣ Option [3]: Download SPECIFIC Video(s) by Link
+- Paste single video post links, range links (`https://t.me/c/12345/10-20`), or multiple space-separated links.
+- Confirms detected videos and downloads them with a live progress bar.
+
+### 4️⃣ Option [4]: Download SPECIFIC File(s)/Document(s) by Link
+- Paste links for non-video files (PDF, PNG, JPG, DOCX, ZIP, PPT, TXT, etc.).
+- Detects documents and downloads them to your download folder.
 
 ---
 
-## Security Best Practices
+## 🔒 Security & Privacy Notice
 
-⚠️ **Crucial Security Reminder**:
-- **Never** share or upload your `.env` file or `session.session` files. These files contain login tokens and credentials that grant full API access to your Telegram account.
-- This repository is configured with a `.gitignore` file that automatically excludes these files from git commits. Keep it that way.
+- **No Secrets Tracked**: `.env` and `*.session` files are listed in `.gitignore` to prevent sensitive credentials from ever being uploaded.
+- **Local Execution**: All session data and credentials stay on your local computer.
 
 ---
 
-## Troubleshooting
+## 🤝 Open Source & Contributions
 
-- **Connection / Authentication Error**: Check if your `API_ID` and `API_HASH` are correct, or verify if your network has blocked Telegram services.
-- **Channel Access Denied**: Ensure that the Telegram account you are logging in with has joined or has read permission on the target channel/chat.
-- **SQLite Error**: If you encounter an error involving `session.session` database lock, close any other terminal running the downloader or delete the `session.session` file and log in again.
+This project is **Open Source** under the **MIT License**. Contributions, bug fixes, and feature upgrades are welcome!
+
+1. Fork the Project.
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
+4. Push to the Branch (`git push origin feature/AmazingFeature`).
+5. Open a Pull Request.
+
+---
+
+## 📜 License
+
+Distributed under the MIT License. See [`LICENSE`](LICENSE) for details.
+
+Developed with ❤️ by **PARVEJ**
