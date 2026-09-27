@@ -7,10 +7,16 @@
 
 # Downloads Folder
 downloads/
+Telegram Downloads/
+*.mp4
+*.mkv
+*.avi
+*.pdf
 
-# Python Cache
+# Scratch & Cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .pytest_cache/
+scratch/
