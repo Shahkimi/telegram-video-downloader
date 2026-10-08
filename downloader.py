@@ -27,9 +27,8 @@ if sys.stderr and getattr(sys.stderr, 'encoding', None) and sys.stderr.encoding.
         pass
 
 from dotenv import load_dotenv
-from telethon import TelegramClient
-from telethon.tl.types import Channel, Chat, InputDocumentFileLocation
-from telethon.tl.functions.upload import GetFileRequest
+from telethon import TelegramClient, errors
+from telethon.tl.types import Channel, Chat
 from rich.console import Console
 
 from rich.progress import (
@@ -296,107 +295,149 @@ def parse_telegram_link(link_input, default_channel_id=None):
     return []
 
 # ---------------------------------------------------------------------
-# Single File Download Worker
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
 # High-Speed Fault-Tolerant Parallel Download Engine
 # ---------------------------------------------------------------------
 
-async def fast_download_media(client, message, peer, output_path, progress_cb=None, parallel_workers=16, chunk_size=128 * 1024):
+async def fast_download_media(client, message, peer, output_path, progress_cb=None, parallel_workers=16, chunk_size=512 * 1024, max_retries=5):
     """
-    High-Speed Fault-Tolerant Parallel Downloader (30+ MB/s).
-    Downloads files using multi-connection streams with file handle caching and automatically
-    bypasses/zero-pads any server-side corrupted chunks (LocationInvalidError) so 99.8%+ of the file is saved intact.
+    High-Speed Parallel Downloader.
+    Splits the file into contiguous byte ranges and downloads them concurrently through
+    Telethon's iter_download, which routes requests to the data center that stores the file,
+    and handles timeouts and short flood waits.
+    A range that keeps failing raises instead of being skipped, so the file on disk is either
+    complete and byte-exact or the download fails. Nothing is ever zero-padded.
     """
     file_size = getattr(message.file, "size", 0) if message.file else 0
     doc = getattr(message.media, 'document', None) if message and message.media else None
 
-    # Fallback to standard telethon download_media for non-documents or small files (< 1MB)
-    if not doc or not file_size or file_size < 1024 * 1024:
+    async def single_stream_download():
         if client:
-            return await client.download_media(message, file=output_path, progress_callback=progress_cb)
+            result = await client.download_media(message, file=output_path, progress_callback=progress_cb)
         else:
-            return await message.download_media(file=output_path, progress_callback=progress_cb)
+            result = await message.download_media(file=output_path, progress_callback=progress_cb)
+        if not result or not os.path.exists(result):
+            raise IOError("Telegram returned no file data")
+        if doc and file_size and os.path.getsize(result) != file_size:
+            raise IOError(f"Incomplete file: expected {file_size} bytes, got {os.path.getsize(result)}")
+        return result
 
-    # Pre-allocate output file with zeros
-    with open(output_path, "wb") as f:
-        f.truncate(file_size)
+    # Fallback to standard telethon download_media for non-documents or small files (< 1MB)
+    if not client or not doc or not file_size or file_size < 1024 * 1024:
+        return await single_stream_download()
 
-    total_parts = (file_size + chunk_size - 1) // chunk_size
+    request_size = chunk_size
+    total_parts = (file_size + request_size - 1) // request_size
 
     # Tune workers dynamically based on file size
     if file_size < 50 * 1024 * 1024:
         workers = 8
     else:
         workers = parallel_workers
+    workers = max(1, min(workers, total_parts))
+
+    # Split the file into one contiguous range per worker, aligned to request_size
+    parts_per_worker = (total_parts + workers - 1) // workers
+    ranges = []
+    for i in range(workers):
+        start = i * parts_per_worker * request_size
+        end = min(start + parts_per_worker * request_size, file_size)
+        if start < end:
+            ranges.append((start, end))
+
+    # Pre-allocate output file so each range can be written at its own offset
+    with open(output_path, "wb") as f:
+        f.truncate(file_size)
 
     downloaded_bytes = 0
-    skipped_bytes = 0
-    progress_lock = asyncio.Lock()
     file_write_lock = asyncio.Lock()
-    sem = asyncio.Semaphore(workers)
+    current_doc = doc
 
-    curr_location = InputDocumentFileLocation(
-        id=doc.id,
-        access_hash=doc.access_hash,
-        file_reference=doc.file_reference,
-        thumb_size=""
-    )
+    async def refresh_document():
+        nonlocal current_doc
+        fresh_msg = await client.get_messages(peer, ids=message.id)
+        fresh_doc = getattr(fresh_msg.media, 'document', None) if fresh_msg and fresh_msg.media else None
+        if not fresh_doc or fresh_doc.id != doc.id:
+            raise IOError("Message media changed or is no longer available")
+        current_doc = fresh_doc
 
     out_fp = open(output_path, "r+b")
 
-    try:
-        async def download_part(part_index):
-            nonlocal downloaded_bytes, skipped_bytes, curr_location
-            offset = part_index * chunk_size
-            limit = chunk_size
-
-            async with sem:
-                success = False
-                for retry in range(2):
-                    try:
-                        res = await client(GetFileRequest(
-                            location=curr_location,
-                            offset=offset,
-                            limit=limit
-                        ))
-                        data = res.bytes
-                        if data:
-                            async with file_write_lock:
-                                out_fp.seek(offset)
-                                out_fp.write(data)
-                            success = True
-                            break
-                    except Exception as e:
-                        err_str = str(e).lower()
-                        if "file_reference" in err_str:
-                            try:
-                                fresh_msg = await client.get_messages(peer, ids=message.id)
-                                if fresh_msg and fresh_msg.media and getattr(fresh_msg.media, 'document', None):
-                                    f_doc = fresh_msg.media.document
-                                    curr_location = InputDocumentFileLocation(
-                                        id=f_doc.id,
-                                        access_hash=f_doc.access_hash,
-                                        file_reference=f_doc.file_reference,
-                                        thumb_size=""
-                                    )
-                            except Exception:
-                                pass
-                        await asyncio.sleep(0.1)
-
-                async with progress_lock:
-                    if success:
-                        downloaded_bytes += limit
-                    else:
-                        skipped_bytes += limit
-
+    async def download_range(start, end):
+        nonlocal downloaded_bytes
+        pos = start
+        failures = 0
+        while pos < end:
+            stream = client.iter_download(
+                current_doc,
+                offset=pos,
+                limit=(end - pos + request_size - 1) // request_size,
+                request_size=request_size,
+                file_size=file_size
+            )
+            try:
+                async for chunk in stream:
+                    chunk = bytes(chunk[:end - pos])
+                    if not chunk:
+                        break
+                    async with file_write_lock:
+                        out_fp.seek(pos)
+                        out_fp.write(chunk)
+                    pos += len(chunk)
+                    downloaded_bytes += len(chunk)
+                    failures = 0
                     if progress_cb:
-                        progress_cb(downloaded_bytes + skipped_bytes, file_size)
+                        progress_cb(downloaded_bytes, file_size)
+                    if pos >= end:
+                        break
 
-        tasks = [download_part(i) for i in range(total_parts)]
+                if pos < end:
+                    raise IOError(f"Telegram ended the stream early at byte {pos} (expected {end})")
+
+            except (errors.FileReferenceExpiredError, errors.FilerefUpgradeNeededError):
+                failures += 1
+                if failures > max_retries:
+                    raise
+                await refresh_document()
+
+            except errors.FloodWaitError as e:
+                await asyncio.sleep(e.seconds + 1)
+
+            except Exception as e:
+                # CDN-hosted files need decryption that only download_media performs
+                if type(e).__name__ == "_CdnRedirect":
+                    raise
+                failures += 1
+                if failures > max_retries:
+                    raise
+                await asyncio.sleep(min(2 ** failures, 30))
+
+            finally:
+                try:
+                    await stream.close()
+                except Exception:
+                    pass
+
+    tasks = [asyncio.ensure_future(download_range(start, end)) for start, end in ranges]
+    use_single_stream = False
+    try:
         await asyncio.gather(*tasks)
+    except Exception as e:
+        if type(e).__name__ != "_CdnRedirect":
+            raise
+        use_single_stream = True
     finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         out_fp.close()
+
+    if use_single_stream:
+        return await single_stream_download()
+
+    actual_size = os.path.getsize(output_path)
+    if downloaded_bytes != file_size or actual_size != file_size:
+        raise IOError(f"Incomplete file: expected {file_size} bytes, received {downloaded_bytes}, on disk {actual_size}")
 
     return output_path
 
@@ -454,18 +495,21 @@ async def download_worker(message, index, total_count, progress, target_entity=N
         
         c = get_client() or getattr(message, '_client', None)
         output_path = os.path.join(downloads_dir, file_name)
+        # Download into a temporary .part file; it is renamed only once complete
+        part_path = f"{output_path}.part"
         peer = target_entity or getattr(message, 'peer_id', None) or getattr(message, 'input_chat', None) or getattr(message, 'chat_id', None)
 
         max_retries = 3
 
         for attempt in range(1, max_retries + 1):
             try:
-                # Always remove existing partial file before starting to ensure clean download from byte 0
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                    except Exception:
-                        pass
+                # Always remove existing files before starting to ensure clean download from byte 0
+                for path in (output_path, part_path):
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
 
                 current_msg = message
                 if peer and c:
@@ -476,25 +520,29 @@ async def download_worker(message, index, total_count, progress, target_entity=N
                     except Exception:
                         pass
 
-                await fast_download_media(
+                saved_path = await fast_download_media(
                     c,
                     current_msg,
                     peer,
-                    output_path,
+                    part_path,
                     progress_cb=progress_cb
                 )
+                if not saved_path or not os.path.exists(saved_path):
+                    raise IOError("Download produced no file")
+                os.replace(saved_path, output_path)
 
                 progress.remove_task(task_id)
                 progress.console.print(f"✓ [Finished] File ID: {current_msg.id} ({file_name})")
                 return True
 
             except Exception as e:
-                # Remove partial file on error before retrying
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                    except Exception:
-                        pass
+                # Remove partial files on error before retrying
+                for path in (output_path, part_path):
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
 
                 if attempt < max_retries:
                     await asyncio.sleep(1.5)
