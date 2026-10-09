@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import AppConfig, config_from_dict, config_to_dict
 from .library import Library, LibraryEntry
+from .storage import subfolder_name
 
 FORMAT = "tg-downloader-backup"
 VERSION = 1
@@ -194,6 +195,11 @@ def apply_library(library: Library, rows: list[dict[str, Any]]) -> int:
             continue
         if entry.folder and not os.path.isdir(entry.folder):
             entry.folder = None
+        given = entry.subfolders if isinstance(entry.subfolders, list) else []
+        entry.subfolders = []
+        for sub in given:
+            if isinstance(sub, str):
+                entry.remember_subfolder(subfolder_name(sub))
         existing = library.get(entry.chat_id)
         if existing is None:
             entry.unread = 0
@@ -202,5 +208,7 @@ def apply_library(library: Library, rows: list[dict[str, Any]]) -> int:
         else:
             existing.nomedia = existing.nomedia or entry.nomedia
             existing.folder = existing.folder or entry.folder
+            for name in entry.subfolders:
+                existing.remember_subfolder(name)
             existing.last_seen_id = max(existing.last_seen_id, entry.last_seen_id)
     return added

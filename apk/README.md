@@ -70,6 +70,12 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
   already downloaded play from the phone instead. Seeking works, though a jump may take a moment while Telegram sends
   that part.
 - Long-press a row to select several, then use the floating *Download* button. The toolbar has *Select all* and *Invert*.
+- **Download to a folder of your own**: select media, then tap *To folder...* (or the folder icon in the toolbar; a single
+  item has *To folder...* in its details). Pick the chat's main folder, one of the folders you made before (with its file
+  count), or type a new name. The files go to `Chat name/your folder/`, for example `Dev/auth`, `Dev/session`,
+  `Dev/localstorage`. Plain *Download* still saves straight into the chat's folder (`Dev`). Finished rows show the folder
+  name, the queue shows `Dev / auth`, and the folder names are remembered per Library chat and included in the backup.
+  A chat hidden with `.nomedia` hides its custom folders too. *Get all* saves into the main folder.
 - *Get all* (or the download menu) scans the whole chat and queues everything that is not downloaded or queued yet.
 
 ### Download queue

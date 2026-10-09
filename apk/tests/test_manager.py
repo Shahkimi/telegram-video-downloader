@@ -400,3 +400,37 @@ async def test_placer_and_nomedia(paths, monkeypatch, tmp_path):
     mgr.enqueue_telegram(resolved(1))
     await mgr.wait_idle()
     assert dirs == [(1, str(paths.default_downloads_dir))]
+
+
+async def test_subfolder_inside_the_channel_folder(paths, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from tgdl.engine.manager import Placement
+
+    dirs = []
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download(dirs))
+    mgr = make(paths, per_channel_folders=True)
+    chan = SimpleNamespace(title="Dev")
+    root = str(paths.default_downloads_dir)
+    batch = [ResolvedMsg(FakeMessage(id=i, text="v"), chan, "src") for i in (1, 2)]
+    auth = mgr.enqueue_telegram(batch, subfolder="auth")
+    plain = mgr.enqueue_telegram([ResolvedMsg(FakeMessage(id=3, text="v"), chan, "src")])
+    evil = mgr.enqueue_telegram([ResolvedMsg(FakeMessage(id=4, text="v"), chan, "src")], subfolder="../../x/..")
+    await mgr.wait_idle()
+    assert all(i.folder == os.path.join(root, "Dev", "auth") for i in auth)
+    assert plain[0].folder == os.path.join(root, "Dev")         # nothing chosen: the channel folder, as before
+    assert evil[0].subfolder == "x" and evil[0].folder == os.path.join(root, "Dev", "x")
+    assert os.path.isdir(os.path.join(root, "Dev", "auth"))
+
+    # a retry keeps the folder it was given
+    auth[0].state = ItemState.FAILED
+    mgr.retry(auth[0].id)
+    assert auth[0].folder == os.path.join(root, "Dev", "auth")
+    await mgr.wait_idle()
+
+    # a hidden chat keeps its .nomedia in the chat folder, which also covers the subfolder
+    own = tmp_path / "Dev"
+    mgr.placer = lambda item: Placement(str(own), nomedia=True)
+    mgr.enqueue_telegram([ResolvedMsg(FakeMessage(id=5, text="v"), chan, "src")], subfolder="session")
+    await mgr.wait_idle()
+    assert (own / ".nomedia").exists() and (own / "session").is_dir() and not (own / "session" / ".nomedia").exists()

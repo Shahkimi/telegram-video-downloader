@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import flet as ft
 
 from tgdl.engine.models import DownloadItem, ItemState
-from tgdl.storage import hidden_by
+from tgdl.storage import hidden_by, subfolder_name, subfolder_of
 from tgdl.stream import StreamSource
 from tgdl.telegram.browse import MediaEntry, fetch_media
 from tgdl.telegram.dialogs import ChatCategory
@@ -22,6 +22,7 @@ from tgdl.util import format_eta, format_size, format_speed
 
 from ..widgets import cover, empty_state, muted, safe_update
 from . import player
+from .folder_picker import open_folder_picker
 
 if TYPE_CHECKING:
     from ..app import App
@@ -122,6 +123,10 @@ class MediaRow:
             self.meta.value = f"{item.percent:.0f}%  -  {format_speed(item.speed)}  -  ETA {format_eta(item.eta)}"
         else:
             self.meta.value = describe_entry(entry)
+            if status == "done":
+                tag = v.subfolder_tag(entry)
+                if tag:
+                    self.meta.value = f"{tag}  -  {self.meta.value}"
             spec = {
                 "none": (ft.Icons.ARROW_CIRCLE_DOWN_OUTLINED, None, "Download", lambda e: v.download([entry])),
                 "queued": (ft.Icons.SCHEDULE, ft.Colors.ON_SURFACE_VARIANT, "Waiting. Tap to cancel", lambda e: v.cancel(item)),
@@ -174,6 +179,8 @@ class ChannelView:
         self.filter_chips = ft.Row(spacing=6, scroll=ft.ScrollMode.AUTO)
         self.count_text = ft.Text("", size=13, weight=ft.FontWeight.W_600)
         self.banner = ft.Container(visible=False)
+        self.to_folder_btn = ft.TextButton("To folder...", icon=ft.Icons.CREATE_NEW_FOLDER, visible=False,
+                                           on_click=lambda e: self.download_selected_to_folder())
         self.more_btn = ft.TextButton("Load older", icon=ft.Icons.EXPAND_MORE, visible=False, on_click=lambda e: app.page.run_task(self.load_more))
         self.spinner = ft.ProgressBar(visible=False)
         self.empty = ft.Container(visible=False)
@@ -186,7 +193,9 @@ class ChannelView:
             ft.Row([self.lib_btn, self.folder_btn, self.hide_btn, self.all_btn], alignment=ft.MainAxisAlignment.SPACE_AROUND),
             self.banner,
             self.filter_chips,
-            ft.Row([self.count_text, ft.TextButton("Select", icon=ft.Icons.CHECKLIST, on_click=lambda e: self.start_selecting())],
+            ft.Row([self.count_text, ft.Row([self.to_folder_btn, ft.TextButton("Select", icon=ft.Icons.CHECKLIST,
+                                                                                  on_click=lambda e: self.start_selecting())],
+                                            spacing=0)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             self.spinner,
         ])
@@ -206,6 +215,7 @@ class ChannelView:
             ft.IconButton(ft.Icons.REFRESH, tooltip="Reload", on_click=lambda e: app.page.run_task(self.reload)),
         ]
         self.select_actions: list[ft.Control] = [
+            ft.IconButton(ft.Icons.CREATE_NEW_FOLDER, tooltip="Download to folder...", on_click=lambda e: self.download_selected_to_folder()),
             ft.IconButton(ft.Icons.SELECT_ALL, tooltip="Select all", on_click=lambda e: self.select_all()),
             ft.IconButton(ft.Icons.FLIP_TO_BACK, tooltip="Invert selection", on_click=lambda e: self.invert()),
             ft.IconButton(ft.Icons.CLOSE, tooltip="Done", on_click=lambda e: self.stop_selecting()),
@@ -455,7 +465,8 @@ class ChannelView:
             self.start_selecting()
         self.toggle(entry.msg_id)
 
-    def download(self, entries: list[MediaEntry]) -> list[DownloadItem]:
+    def download(self, entries: list[MediaEntry], subfolder: str = "") -> list[DownloadItem]:
+        """Queue entries. `subfolder` is a folder inside this chat's folder; '' saves into the chat's folder itself."""
         if self.entity is None:
             self.app.toast("Still opening the chat, try again in a moment")
             return []
@@ -464,11 +475,36 @@ class ChannelView:
         if not wanted:
             self.app.toast("Already downloaded or in the queue")
             return []
-        added = self.state.manager.enqueue_telegram([ResolvedMsg(e.message, self.entity, self.title) for e in wanted])
+        subfolder = subfolder_name(subfolder)
+        added = self.state.manager.enqueue_telegram([ResolvedMsg(e.message, self.entity, self.title) for e in wanted],
+                                                    subfolder=subfolder)
         self._own(added)
-        self.app.toast(f"Added {len(added)} to the queue", action="Queue", on_action=lambda ev: self.app.open_queue())
+        if subfolder:
+            self.state.remember_subfolder(self.chat_id, subfolder)
+        where = f" to {subfolder}" if subfolder else ""
+        self.app.toast(f"Added {len(added)}{where} to the queue", action="Queue", on_action=lambda ev: self.app.open_queue())
         self.on_downloads_changed()
         return added
+
+    def download_to_folder(self, entries: list[MediaEntry]) -> None:
+        """Ask which folder inside this chat's folder the entries go to, then queue them."""
+        if not entries:
+            self.app.toast("Select something first")
+            return
+        open_folder_picker(self.app, self.chat_id, self.title, len(entries),
+                           lambda name: self._download_and_leave_selection(entries, name))
+
+    def _download_and_leave_selection(self, entries: list[MediaEntry], subfolder: str) -> None:
+        self.download(entries, subfolder)
+        if self.selecting:
+            self.stop_selecting()
+
+    def subfolder_tag(self, entry: MediaEntry) -> str:
+        """The custom folder a downloaded entry was saved into ('' = the chat's own folder)."""
+        record = self.state.history.lookup(self.chat_id, entry.msg_id)
+        if record is None:
+            return ""
+        return subfolder_of(record.path, self.state.folder_for(self.chat_id, self.title))
 
     def watch(self, entry: MediaEntry) -> None:
         """Play a video: the saved file when it is downloaded, otherwise streamed from Telegram."""
@@ -527,6 +563,8 @@ class ChannelView:
             buttons.append(ft.Button("Watch", icon=ft.Icons.PLAY_ARROW, on_click=close_then(lambda: self.watch(entry))))
         if status in ("none", "failed"):
             buttons.append(ft.Button("Download", icon=ft.Icons.DOWNLOAD, on_click=close_then(lambda: self.download([entry]))))
+            buttons.append(ft.OutlinedButton("To folder...", icon=ft.Icons.CREATE_NEW_FOLDER,
+                                             on_click=close_then(lambda: self.download_to_folder([entry]))))
         if record is not None and record.exists:
             buttons.append(ft.OutlinedButton("Open with...", icon=ft.Icons.OPEN_IN_NEW,
                                              on_click=close_then(lambda: page.run_task(self.app.open_with, record.path))))
@@ -561,6 +599,7 @@ class ChannelView:
         else:
             bar.title = ft.Text(self.title)
             bar.actions = list(self.normal_actions)
+        self.to_folder_btn.visible = self.selecting and bool(self.selected)
         self.fab.visible = self.selecting and bool(self.selected)
         self.fab.content = f"Download {len(self.selected)}" if self.selected else "Download"
         safe_update(self.view)
@@ -609,6 +648,9 @@ class ChannelView:
             return
         self.download(chosen)
         self.stop_selecting()
+
+    def download_selected_to_folder(self) -> None:
+        self.download_to_folder([e for e in self.entries if e.msg_id in self.selected])
 
     def download_loaded(self) -> None:
         if not self.entries:

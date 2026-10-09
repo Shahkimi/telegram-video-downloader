@@ -116,3 +116,28 @@ def test_history_records_and_lookup(tmp_path):
     assert len(loaded.records) == 1  # same path replaces the old record
     loaded.clear()
     assert not loaded.records and not loaded.downloaded(-100, 7)
+
+
+def test_subfolder_helpers(tmp_path):
+    from tgdl.storage import subfolder_dir, subfolder_name, subfolder_of, subfolders
+
+    assert subfolder_name("  auth  ") == "auth"
+    assert subfolder_name(r"a/b\c") == "a b c"
+    assert subfolder_name("..") == "" and subfolder_name("") == "" and subfolder_name(None) == ""
+    assert len(subfolder_name("x" * 200)) == 60
+    base = str(tmp_path / "Dev")
+    assert subfolder_dir(base, "") == base
+    assert subfolder_dir(base, "auth") == os.path.join(base, "auth")
+
+    (tmp_path / "Dev" / "session").mkdir(parents=True)
+    (tmp_path / "Dev" / "Auth").mkdir()
+    (tmp_path / "Dev" / ".hidden").mkdir()
+    (tmp_path / "Dev" / "main.mp4").write_bytes(b"1")
+    for name in ("a.mp4", "b.mp4", ".nomedia", "c.mp4.part"):
+        (tmp_path / "Dev" / "Auth" / name).write_bytes(b"1")
+    assert subfolders(base) == [("Auth", 2), ("session", 0)]
+    assert subfolders(str(tmp_path / "missing")) == []
+
+    assert subfolder_of(os.path.join(base, "Auth", "a.mp4"), base) == "Auth"
+    assert subfolder_of(os.path.join(base, "main.mp4"), base) == ""
+    assert subfolder_of(os.path.join(str(tmp_path), "other", "x.mp4"), base) == ""

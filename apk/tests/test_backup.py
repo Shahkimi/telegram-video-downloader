@@ -96,3 +96,15 @@ def test_library_is_added_not_replaced(tmp_path):
     movies, news = target.get(-1001), target.get(-1002)
     assert movies.nomedia and movies.last_seen_id == 50 and movies.folder is None
     assert news.title == "News" and news.folder is None and news.unread == 0
+
+
+def test_library_subfolders_travel_with_the_backup(tmp_path):
+    lib = Library(tmp_path / "library.json", [LibraryEntry(chat_id=-1001, title="Dev", subfolders=["auth", "session"])])
+    back = loads(dumps(make_backup(AppConfig(), library=lib)))
+    target = Library(tmp_path / "other.json", [LibraryEntry(chat_id=-1002, title="News", subfolders=["x"])])
+    rows = back.library + [{"chat_id": -1002, "title": "News", "subfolders": ["x", "Y", 7]},
+                           {"chat_id": -1003, "title": "Bad", "subfolders": "nope"}]
+    apply_library(target, rows)
+    assert target.get(-1001).subfolders == ["auth", "session"]
+    assert target.get(-1002).subfolders == ["x", "Y"]
+    assert target.get(-1003).subfolders == []

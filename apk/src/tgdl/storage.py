@@ -33,6 +33,46 @@ def channel_dir(root: str, title: str) -> str:
     return os.path.join(root, folder_name(title))
 
 
+def subfolder_name(name: str) -> str:
+    """A user-typed subfolder name made safe: one level, no path tricks. '' when nothing usable is left."""
+    cleaned = clean_filename((name or "").replace("/", " ").replace("\\", " "))[:MAX_FOLDER_NAME].strip(" .")
+    return cleaned
+
+
+def subfolder_dir(base: str, name: str) -> str:
+    """base/name for a custom subfolder, or base itself when name is empty."""
+    safe = subfolder_name(name)
+    return os.path.join(base, safe) if safe else base
+
+
+def subfolders(base: str) -> list[tuple[str, int]]:
+    """The visible folders directly inside base with the number of files in each, sorted by name."""
+    out: list[tuple[str, int]] = []
+    try:
+        entries = list(os.scandir(base))
+    except OSError:
+        return out
+    for entry in entries:
+        try:
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            count = sum(1 for f in os.scandir(entry.path)
+                        if f.is_file() and not f.name.startswith(".") and not f.name.endswith(".part"))
+        except OSError:
+            continue
+        out.append((entry.name, count))
+    return sorted(out, key=lambda t: t[0].lower())
+
+
+def subfolder_of(path: str, base: str) -> str:
+    """The subfolder of base that holds path ('' when it sits directly in base or somewhere else)."""
+    parent = os.path.dirname(os.path.abspath(path))
+    root = os.path.abspath(base)
+    if os.path.normcase(os.path.dirname(parent)) == os.path.normcase(root):
+        return os.path.basename(parent)
+    return ""
+
+
 def has_nomedia(folder: str) -> bool:
     return os.path.isfile(os.path.join(folder, NOMEDIA))
 

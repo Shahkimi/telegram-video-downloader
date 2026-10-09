@@ -214,7 +214,8 @@ class DownloadTile:
         self.name.value = item.display_name
         detail = describe_item(item)
         if item.chat_title and item.state is not ItemState.FAILED:
-            detail = f"{item.chat_title}  -  {detail}"
+            where = f"{item.chat_title} / {item.subfolder}" if item.subfolder else item.chat_title
+            detail = f"{where}  -  {detail}"
         self.detail.value = detail
         self.detail.color = ft.Colors.ERROR if item.state is ItemState.FAILED else MUTED
 

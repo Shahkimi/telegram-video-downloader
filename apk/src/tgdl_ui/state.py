@@ -13,7 +13,7 @@ from tgdl.library import History, Library, LibraryEntry
 from tgdl.links.rules import RuleSet
 from tgdl.logs import setup_logging
 from tgdl.paths import AppPaths, resolve_paths
-from tgdl.storage import channel_dir
+from tgdl.storage import channel_dir, subfolders
 from tgdl.stream import StreamServer
 from tgdl.telegram.dialogs import DialogInfo
 from tgdl.telegram.session import TelegramSession
@@ -81,6 +81,20 @@ class AppState:
             return entry.folder
         root = self.manager.downloads_dir
         return channel_dir(root, title) if (self.cfg.per_channel_folders and title) else root
+
+    def subfolder_choices(self, chat_id: int | None, title: str) -> list[tuple[str, int]]:
+        """Custom folders inside the chat's folder: the ones on disk plus the remembered names, with file counts."""
+        found = dict(subfolders(self.folder_for(chat_id, title)))
+        entry = self.library.get(chat_id)
+        if entry is not None:
+            for name in entry.subfolders:
+                found.setdefault(name, 0)
+        return sorted(found.items(), key=lambda t: t[0].lower())
+
+    def remember_subfolder(self, chat_id: int | None, name: str) -> None:
+        entry = self.library.get(chat_id)
+        if entry is not None and entry.remember_subfolder(name):
+            self.save_library()
 
     def place(self, item: DownloadItem) -> Placement | None:
         entry = self.library.get(item.chat_id)

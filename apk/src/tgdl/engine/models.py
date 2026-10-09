@@ -41,6 +41,7 @@ class DownloadItem:
     peer: Any = None                    # telegram: the chat entity
     chat_id: int | None = None          # telegram: marked peer id (-100... for channels)
     chat_title: str = ""                # telegram: chat name, used for the per-channel folder
+    subfolder: str = ""                 # user-chosen folder inside the chat's folder; "" = the chat's folder itself
     folder: str | None = None           # where the file goes; None = decided by the manager when it starts
     url: str | None = None              # ytdlp
     started_at: float | None = None

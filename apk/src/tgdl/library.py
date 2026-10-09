@@ -60,6 +60,14 @@ class LibraryEntry:
     last_seen_id: int = 0               # newest message the user has looked at
     unread: int = 0                     # new media found by the last update check
     last_checked: float = 0.0
+    subfolders: list[str] = field(default_factory=list)   # custom folders made inside this chat's folder
+
+    def remember_subfolder(self, name: str) -> bool:
+        """Keep a subfolder name for the picker. False when it was already known (case-insensitive)."""
+        if name and name.lower() not in {s.lower() for s in self.subfolders}:
+            self.subfolders.append(name)
+            return True
+        return False
 
     @property
     def peer(self) -> int | str:

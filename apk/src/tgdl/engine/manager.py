@@ -20,7 +20,7 @@ from typing import Any, Callable
 from ..config import AppConfig
 from ..links.model import ExternalTarget
 from ..paths import AppPaths
-from ..storage import channel_dir, set_nomedia
+from ..storage import channel_dir, set_nomedia, subfolder_dir, subfolder_name
 from ..telegram.dialogs import peer_id
 from ..telegram.resolve import ResolvedMsg, file_size
 from ..telegram.session import LoginError, TelegramSession
@@ -92,22 +92,24 @@ class DownloadManager:
     def _prepare_folder(self, item: DownloadItem) -> str:
         """Decide (once) where item goes and put the .nomedia markers in place."""
         place = self.placement(item)
-        folder = item.folder or place.folder
+        folder = item.folder or subfolder_dir(place.folder, item.subfolder)
         item.folder = folder
         try:
             os.makedirs(folder, exist_ok=True)
             if self.cfg.nomedia:
                 set_nomedia(self.downloads_dir, True)
-            if place.nomedia:
-                set_nomedia(folder, True)
+            if place.nomedia:   # the marker sits in the chat's folder: Android hides its subfolders too
+                set_nomedia(place.folder if item.subfolder else folder, True)
         except OSError as exc:
             log.warning("cannot prepare %s: %s", folder, exc)
         return folder
 
     # ---- adding work ------------------------------------------------
-    def enqueue_telegram(self, resolved: list[ResolvedMsg]) -> list[DownloadItem]:
+    def enqueue_telegram(self, resolved: list[ResolvedMsg], subfolder: str = "") -> list[DownloadItem]:
+        """`subfolder` sends the files into that folder inside the chat's folder; '' keeps the chat's own folder."""
         out: list[DownloadItem] = []
         total = len(resolved)
+        subfolder = subfolder_name(subfolder)
         for i, r in enumerate(resolved, start=1):
             msg = r.message
             name = build_filename(msg)
@@ -115,7 +117,7 @@ class DownloadManager:
                 id=short_id(), kind="telegram", title=name, filename=name,
                 total=file_size(msg), index=i, batch_total=total, source=r.source,
                 message=msg, peer=r.entity,
-                chat_id=peer_id(r.entity), chat_title=chat_title(r.entity),
+                chat_id=peer_id(r.entity), chat_title=chat_title(r.entity), subfolder=subfolder,
             )
             out.append(item)
         return self._add(out)

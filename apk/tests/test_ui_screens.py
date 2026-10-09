@@ -390,3 +390,68 @@ async def test_backup_wrong_password_asks_again(app):
     await dialog.actions[1].on_click(None)
     again = app.page.show_dialog.call_args[0][0]
     assert again.content.error == "Wrong password, or the file was changed."
+
+
+async def test_download_to_a_custom_folder(app, monkeypatch, tmp_path):
+    entity = chan(-1001, "Dev")
+    msgs = [FakeMessage(id=i, text=f"clip {i}", size=1000 * i) for i in (5, 4, 3, 2)]
+
+    async def fake_fetch(client, ent, f, offset_id=0, min_id=0, limit=40):
+        return MediaPage([entry_for(m) for m in msgs], 0, 5)
+
+    async def connected():
+        return "client"
+
+    monkeypatch.setattr(channel_mod, "fetch_media", fake_fetch)
+    monkeypatch.setattr(app.state.session, "ensure_connected", connected)
+    st = app.state
+    st.library.add(LibraryEntry(chat_id=-1001, title="Dev"))
+    (tmp_path / "dl" / "Dev" / "session").mkdir(parents=True)
+    (tmp_path / "dl" / "Dev" / "session" / "old.mp4").write_bytes(b"1")
+
+    view = app.open_channel(-1001, "Dev", entity=entity)
+    await view.reload()
+
+    # select two, tap "To folder...": the sheet lists the main folder, the existing subfolder, and a field
+    view.on_row_long_press(view.rows[5].entry)
+    view.toggle(4)
+    assert view.to_folder_btn.visible
+    view.download_selected_to_folder()
+    sheet = app.page.show_dialog.call_args[0][0]
+    tiles = [c for c in sheet.content.content.controls if isinstance(c, ft.ListTile)]
+    assert [t.title.value for t in tiles] == ["Dev (main folder)", "session"]
+    assert tiles[1].subtitle.value == "1 file"
+
+    # type a new name: both are queued into it, remembered for the picker, and the selection ends
+    field = next(c for c in sheet.content.content.controls if isinstance(c, ft.Row)).controls[0]
+    field.value = " auth "
+    app.page.pop_dialog = MagicMock()
+    next(c for c in sheet.content.content.controls if isinstance(c, ft.Row)).controls[1].on_click(None)
+    items = st.manager.items
+    assert [(i.msg_id, i.subfolder) for i in items] == [(5, "auth"), (4, "auth")]
+    assert st.library.get(-1001).subfolders == ["auth"] and not view.selecting
+    assert "to auth" in toast(app)
+    assert [n for n, _ in st.subfolder_choices(-1001, "Dev")] == ["auth", "session"]
+
+    # picking the main folder keeps the old behaviour
+    view.download_to_folder([view.rows[3].entry])
+    sheet = app.page.show_dialog.call_args[0][0]
+    next(c for c in sheet.content.content.controls if isinstance(c, ft.ListTile)).on_click(None)
+    assert items[-1].msg_id == 3 and items[-1].subfolder == ""
+
+    # an empty name is refused, nothing is queued
+    view.download_to_folder([view.rows[2].entry])
+    sheet = app.page.show_dialog.call_args[0][0]
+    row = next(c for c in sheet.content.content.controls if isinstance(c, ft.Row))
+    row.controls[0].value = "  "
+    row.controls[1].on_click(None)
+    assert len(items) == 3
+
+    # queue rows and finished rows show where the file went
+    assert "Dev / auth" in app.queue.tiles[items[0].id].detail.value if items[0].id in app.queue.tiles else True
+    path = tmp_path / "dl" / "Dev" / "auth" / "clip 5.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"1")
+    st.history.add(HistoryRecord(path=str(path), filename="clip 5.mp4", chat_id=-1001, msg_id=5))
+    assert view.subfolder_tag(view.rows[5].entry) == "auth"
+    assert view.subfolder_tag(view.rows[3].entry) == ""
