@@ -1,6 +1,8 @@
 package io.github.shahkimi.tgdl.nativeext
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -18,6 +20,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
+import java.io.File
 
 /** Platform half of the Flet `TgdlNative` service. The channel name must match lib/src/tgdl_native.dart. */
 class TgdlNativePlugin :
@@ -110,6 +113,10 @@ class TgdlNativePlugin :
                     result.success(paths.size)
                 }
 
+                "open_with" -> result.success(
+                    openWith(call.argument<String>("path"), call.argument<String>("mime"), call.argument<String>("title") ?: "Open with")
+                )
+
                 "has_all_files_access" -> result.success(hasAllFilesAccess())
                 "request_all_files_access" -> result.success(requestAllFilesAccess())
 
@@ -150,6 +157,27 @@ class TgdlNativePlugin :
         pendingPermission?.success(granted)
         pendingPermission = null
         return true
+    }
+
+    /** Android's app chooser for a downloaded file, every time, so the user picks the player. "opened", "missing" or "no_app". */
+    private fun openWith(path: String?, mime: String?, title: String): String {
+        if (path == null) return "missing"
+        val file = File(path)
+        if (!file.isFile) return "missing"
+        val uri = OpenFileProvider.uriFor(context, file)
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, mime ?: OpenFileProvider.mimeOf(file))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        view.clipData = ClipData.newRawUri(file.name, uri)  // the chooser passes the read grant on to the picked app
+        val chooser = Intent.createChooser(view, title)
+        val starter: Context = activity ?: context
+        if (starter !is Activity) chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            starter.startActivity(chooser)
+            "opened"
+        } catch (_: ActivityNotFoundException) {
+            "no_app"
+        }
     }
 
     /** Android 11+: "All files access" (needed to save outside Download/). Older: the classic storage permission. */

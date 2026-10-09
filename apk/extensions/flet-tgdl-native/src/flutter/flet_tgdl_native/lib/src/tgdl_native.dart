@@ -24,6 +24,7 @@ class TgdlNativeService extends FletService {
     'public_downloads_dir',
     'scan_file',
     'scan_files',
+    'open_with',
     'has_all_files_access',
     'request_all_files_access',
     'sdk_int',

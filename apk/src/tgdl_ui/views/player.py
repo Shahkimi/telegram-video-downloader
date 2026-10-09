@@ -75,6 +75,8 @@ class PlayerPage:
             buttons.append(ft.Button("Download", icon=ft.Icons.DOWNLOAD, on_click=self._download))
             actions.append(ft.IconButton(ft.Icons.DOWNLOAD, tooltip="Download", on_click=self._download))
         if self.path:
+            buttons.append(ft.OutlinedButton("Open with...", icon=ft.Icons.OPEN_IN_NEW,
+                                             on_click=lambda e: self.app.page.run_task(self.app.open_with, self.path)))
             buttons.append(ft.OutlinedButton("Share", icon=ft.Icons.SHARE,
                                              on_click=lambda e: self.app.page.run_task(self.app.share_file, self.path)))
         root = ft.Column(

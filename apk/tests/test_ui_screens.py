@@ -272,7 +272,59 @@ def test_history_offers_play_for_videos(app, tmp_path):
     app.show("history")
     row = app.history.list.controls[-1]
     menu = row.content.controls[-1]
-    assert [i.content for i in menu.items][:2] == ["Play", "Share"]
+    assert [i.content for i in menu.items][:3] == ["Play", "Open with...", "Share"]
+
+
+async def test_queue_plays_and_opens_finished_files(app, tmp_path, monkeypatch):
+    video, doc = tmp_path / "clip.mkv", tmp_path / "notes.pdf"
+    video.write_bytes(b"1")
+    doc.write_bytes(b"1")
+    manager = app.state.manager
+    manager.items += [
+        DownloadItem(id="v", kind="telegram", title="clip", state=ItemState.DONE, path=str(video)),
+        DownloadItem(id="p", kind="telegram", title="notes", state=ItemState.DONE, path=str(doc)),
+        DownloadItem(id="g", kind="telegram", title="gone", state=ItemState.DONE, path=str(tmp_path / "gone.mp4")),
+    ]
+    app.open_queue()
+    tiles = app.queue.tiles
+    assert [i.content for i in tiles["v"].menu.items] == ["Play", "Open with...", "Share"]
+    assert tiles["v"].action.visible and tiles["v"].action.tooltip == "Play"
+    assert [i.content for i in tiles["p"].menu.items] == ["Open with...", "Share"]
+    assert tiles["p"].action.tooltip == "Open with..."
+    assert not tiles["g"].menu.visible and not tiles["g"].action.visible
+
+    scheduled = []
+    app.page.run_task = lambda fn, *a: scheduled.append((fn, a))
+    tiles["v"]._quick()
+    assert scheduled[-1][0].__self__.path == str(video)          # the in-app player
+    tiles["p"]._quick()
+    assert scheduled[-1] == (app.open_with, (str(doc),))
+
+    # Android: the system chooser gets the file and a type players accept
+    calls = []
+
+    async def chooser(path, mime, title):
+        calls.append((path, mime))
+        return "no_app" if path.endswith(".pdf") else "opened"
+
+    monkeypatch.setattr(app.native, "available", True)
+    monkeypatch.setattr(app.native, "open_with", chooser)
+    await app.open_with(str(video))
+    assert calls == [(str(video), "video/*")] or calls == [(str(video), "video/x-matroska")]
+    await app.open_with(str(doc))
+    assert "No app" in toast(app)
+    await app.open_with(str(tmp_path / "gone.mp4"))
+    assert "no longer" in toast(app) and len(calls) == 2
+
+
+def test_mime_for_offers_videos_to_players():
+    from tgdl.storage import mime_for
+
+    assert mime_for("a.mp4") == "video/mp4"
+    assert mime_for("a.ts").startswith("video/")
+    assert mime_for("a.MKV").startswith("video/")
+    assert mime_for("a.pdf") == "application/pdf"
+    assert mime_for("noext") is None
 
 
 async def test_settings_backup_export_and_import(app, tmp_path, monkeypatch):

@@ -50,6 +50,11 @@ class TgdlNative(ft.Service):
         """Ask the media scanner to look at many files again (after a .nomedia marker changed)."""
         return int(await self._invoke_method("scan_files", {"paths": list(paths)}, timeout=SHORT) or 0)
 
+    async def open_with(self, path: str, mime: Optional[str] = None, title: str = "Open with") -> str:
+        """Show Android's app chooser for a file. `opened`, `missing` or `no_app`."""
+        args = {"path": path, "mime": mime, "title": title}
+        return str(await self._invoke_method("open_with", args, timeout=SHORT) or "no_app")
+
     async def has_all_files_access(self) -> bool:
         return bool(await self._invoke_method("has_all_files_access", timeout=SHORT))
 

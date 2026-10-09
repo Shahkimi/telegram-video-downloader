@@ -1,4 +1,5 @@
-"""Download queue (More > Download queue): live progress, pause/resume, reorder, cancel and retry."""
+"""Download queue (More > Download queue): live progress, pause/resume, reorder, cancel and retry, and play or open
+finished files."""
 from __future__ import annotations
 
 import logging
@@ -10,6 +11,7 @@ from tgdl.engine.models import DownloadItem, ItemState
 from tgdl.util import format_size, format_speed
 
 from ..widgets import DownloadTile, empty_state, muted, safe_update
+from . import player
 
 if TYPE_CHECKING:
     from ..app import App
@@ -169,6 +171,13 @@ class QueueView:
             manager.resume(item.id)
         elif action == "top":
             manager.move_to_top(item.id)
+        elif action == "play" and item.path:
+            if player.available():
+                self.app.page.run_task(player.PlayerPage(self.app, item.display_name, path=item.path).open)
+            else:
+                self.app.page.run_task(self.app.open_with, item.path)
+        elif action == "open_with" and item.path:
+            self.app.page.run_task(self.app.open_with, item.path)
         elif action == "share" and item.path:
             self.app.page.run_task(self.app.share_file, item.path)
         elif action == "channel" and item.chat_id is not None:

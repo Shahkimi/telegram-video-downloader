@@ -75,6 +75,10 @@ class Native:
         for start in range(0, len(paths), 200):
             await self._call("scan_files", paths[start:start + 200])
 
+    async def open_with(self, path: str, mime: str | None = None, title: str = "Open with") -> str:
+        """'opened', 'missing', 'no_app', or 'failed' (no extension or the call broke)."""
+        return str(await self._call("open_with", path, mime, title, default="failed") or "failed")
+
     async def has_all_files_access(self) -> bool:
         """True on desktop: there is nothing to ask for."""
         if not self.available:

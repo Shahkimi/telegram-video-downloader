@@ -44,5 +44,12 @@
             android:name=".KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- "Open with": lends one downloaded file, read-only, to the app the user picks -->
+        <provider
+            android:name=".OpenFileProvider"
+            android:authorities="${applicationId}.tgdl.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

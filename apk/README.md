@@ -64,7 +64,7 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
 
 - The button on each row shows its state: download arrow, waiting clock, a progress ring while downloading (tap to pause),
   a pause icon (tap to resume), a green check when it is on the phone, or a red error (tap to retry).
-- Tap a row for details (caption, size, where it was saved) with Download, Share and Delete.
+- Tap a row for details (caption, size, where it was saved) with Download, Open with, Share and Delete.
 - **Watch before downloading**: tap a video's picture (it has a play icon) or *Watch* in its details. The video streams
   straight from Telegram and nothing is saved; *Download* on the player queues it if you want to keep it. Videos that are
   already downloaded play from the phone instead. Seeking works, though a jump may take a moment while Telegram sends
@@ -77,6 +77,11 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
 *More > Download queue* lists running, waiting, paused and finished downloads. The pause button in the toolbar pauses
 the whole queue; each row has its own menu with *Pause/Resume*, *Move to top*, *Cancel*, *Try again*, *Share* and
 *Open channel*. Telegram cannot continue a half-finished file, so a paused download starts that file over when resumed.
+
+Finished rows add *Play* (videos, in the app's own player) and *Open with...*, which shows Android's app list every time
+so you pick the app: VLC, MX Player, a gallery, a PDF reader. The button on the row plays a video, or opens any other
+file the same way. The other app gets read-only access to that one file, and it works for files hidden with `.nomedia`
+too. History and the player page have *Open with...* as well.
 
 ### Backing up your settings
 

@@ -1,12 +1,26 @@
 """Download folders: one folder per channel, and the .nomedia marker that hides a folder from gallery apps."""
 from __future__ import annotations
 
+import mimetypes
 import os
 
 from .util import clean_filename
 
 NOMEDIA = ".nomedia"
 MAX_FOLDER_NAME = 60
+VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts", ".3gp"}
+
+
+def is_video(name: str) -> bool:
+    return os.path.splitext(name or "")[1].lower() in VIDEO_EXT
+
+
+def mime_for(name: str) -> str | None:
+    """The type other apps are offered the file as. Videos always get a video type, so players show up."""
+    guess = mimetypes.guess_type(name or "")[0]
+    if is_video(name) and not (guess or "").startswith("video/"):
+        return "video/*"            # e.g. .ts guesses as text, .mkv is unknown on some systems
+    return guess
 
 
 def folder_name(title: str) -> str:

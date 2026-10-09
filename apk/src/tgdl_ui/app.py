@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 import time
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -19,7 +21,7 @@ from tgdl.engine.models import DownloadItem, ItemState
 from tgdl.links.model import RouteResult
 from tgdl.links.router import route
 from tgdl.paths import DOWNLOAD_SUBDIR
-from tgdl.storage import NOMEDIA, hidden_by, media_files, set_nomedia
+from tgdl.storage import NOMEDIA, hidden_by, media_files, mime_for, set_nomedia
 from tgdl.telegram.browse import chat_cover, message_thumb
 from tgdl.telegram.dialogs import classify, peer_id
 from tgdl.util import format_speed
@@ -648,6 +650,26 @@ class App:
             await self.share.share_files([ft.ShareFile.from_path(path)])
         except Exception as exc:  # noqa: BLE001
             self.toast(f"Cannot share this file: {exc}", error=True)
+
+    async def open_with(self, path: str) -> None:
+        """Let the user pick an app (VLC, MX Player, a gallery...) to open a downloaded file."""
+        if not path or not os.path.isfile(path):
+            self.toast("The file is no longer on the phone", error=True)
+            return
+        if self.native.available:
+            result = await self.native.open_with(path, mime_for(path), "Open with")
+            if result == "no_app":
+                self.toast("No app on this phone can open this file", error=True)
+            elif result != "opened":
+                self.toast("Cannot open this file", error=True)
+            return
+        try:  # desktop: the system's default app
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+        except (OSError, AttributeError) as exc:
+            self.toast(f"Cannot open this file: {exc}", error=True)
 
     # ======================================================================= app lifecycle
     def _on_lifecycle(self, e: ft.AppLifecycleStateChangeEvent) -> None:

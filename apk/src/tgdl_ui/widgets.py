@@ -1,11 +1,13 @@
 """Small reusable UI pieces."""
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import flet as ft
 
 from tgdl.engine.models import DownloadItem, ItemState
+from tgdl.storage import is_video
 from tgdl.util import format_eta, format_size, format_speed
 
 MUTED = ft.Colors.ON_SURFACE_VARIANT
@@ -137,6 +139,8 @@ MENU_LABELS = {
     "top": ("Move to top", ft.Icons.VERTICAL_ALIGN_TOP),
     "cancel": ("Cancel", ft.Icons.CLOSE),
     "retry": ("Try again", ft.Icons.REPLAY),
+    "play": ("Play", ft.Icons.PLAY_ARROW),
+    "open_with": ("Open with...", ft.Icons.OPEN_IN_NEW),
     "share": ("Share", ft.Icons.SHARE),
     "channel": ("Open channel", ft.Icons.FOLDER_SPECIAL),
 }
@@ -153,8 +157,10 @@ def item_actions(item: DownloadItem) -> list[str]:
         out = ["resume", "cancel"]
     elif s in (ItemState.FAILED, ItemState.CANCELLED):
         out = ["retry"]
+    elif item.path and os.path.isfile(item.path):
+        out = (["play"] if is_video(item.path) else []) + ["open_with", "share"]
     else:
-        out = ["share"] if item.path else []
+        out = []
     if item.chat_id is not None:
         out.append("channel")
     return out
@@ -163,7 +169,8 @@ def item_actions(item: DownloadItem) -> list[str]:
 class DownloadTile:
     """One row of the download queue. update_from() changes the existing controls in place."""
 
-    QUICK = {"pause": ft.Icons.PAUSE, "resume": ft.Icons.PLAY_ARROW, "retry": ft.Icons.REPLAY, "share": ft.Icons.SHARE}
+    QUICK = {"pause": ft.Icons.PAUSE, "resume": ft.Icons.PLAY_ARROW, "retry": ft.Icons.REPLAY,
+             "play": ft.Icons.PLAY_CIRCLE_OUTLINE, "open_with": ft.Icons.OPEN_IN_NEW}
 
     def __init__(self, item: DownloadItem, on_action: Callable[[str, DownloadItem], None]):
         self.item_id = item.id
@@ -175,7 +182,7 @@ class DownloadTile:
         self.action = ft.IconButton(icon=ft.Icons.CANCEL, icon_size=22, on_click=lambda e: self._quick())
         self.menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, items=[])
         self._item = item
-        self._actions: list[str] = []
+        self._actions: list[str] | None = None   # None, so the first update_from() always fills the menu
         self.control = ft.Container(
             padding=ft.Padding.only(left=12, right=0, top=8, bottom=8),
             content=ft.Column(

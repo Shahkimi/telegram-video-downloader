@@ -528,6 +528,8 @@ class ChannelView:
         if status in ("none", "failed"):
             buttons.append(ft.Button("Download", icon=ft.Icons.DOWNLOAD, on_click=close_then(lambda: self.download([entry]))))
         if record is not None and record.exists:
+            buttons.append(ft.OutlinedButton("Open with...", icon=ft.Icons.OPEN_IN_NEW,
+                                             on_click=close_then(lambda: page.run_task(self.app.open_with, record.path))))
             buttons.append(ft.OutlinedButton("Share", icon=ft.Icons.SHARE,
                                              on_click=close_then(lambda: page.run_task(self.app.share_file, record.path))))
             buttons.append(ft.TextButton("Delete file", icon=ft.Icons.DELETE_OUTLINE,

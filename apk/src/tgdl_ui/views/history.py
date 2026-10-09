@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from tgdl.library import HistoryRecord
+from tgdl.storage import is_video
 from tgdl.telegram.browse import thumb_path
 from tgdl.util import format_size
 
@@ -22,7 +23,6 @@ if TYPE_CHECKING:
 log = logging.getLogger("tgdl.ui.history")
 
 MAX_ROWS = 400
-VIDEO_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts", ".3gp"}
 
 
 class HistoryView:
@@ -81,8 +81,7 @@ class HistoryView:
         safe_update(self.root)
 
     def _thumb(self, record: HistoryRecord) -> ft.Control:
-        is_video = os.path.splitext(record.filename)[1].lower() in VIDEO_EXT
-        content: ft.Control = ft.Icon(ft.Icons.MOVIE if is_video else ft.Icons.INSERT_DRIVE_FILE, color=ft.Colors.ON_SURFACE_VARIANT)
+        content: ft.Control = ft.Icon(ft.Icons.MOVIE if is_video(record.filename) else ft.Icons.INSERT_DRIVE_FILE, color=ft.Colors.ON_SURFACE_VARIANT)
         if record.msg_id is not None:
             path = thumb_path(self.app.state.paths.cache_dir, record.chat_id, record.msg_id)
             try:
@@ -99,10 +98,11 @@ class HistoryView:
         when = datetime.fromtimestamp(record.finished_at).strftime("%H:%M")
         meta = "  -  ".join(p for p in (record.chat_title or (record.url or ""), format_size(record.size) if record.size else "", when) if p)
         items = []
-        is_video = os.path.splitext(record.filename)[1].lower() in VIDEO_EXT
-        if exists and is_video and player.available():
+        if exists and is_video(record.filename) and player.available():
             items.append(ft.PopupMenuItem(content="Play", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self.play(record)))
         if exists:
+            items.append(ft.PopupMenuItem(content="Open with...", icon=ft.Icons.OPEN_IN_NEW,
+                                          on_click=lambda e: self.app.page.run_task(self.app.open_with, record.path)))
             items.append(ft.PopupMenuItem(content="Share", icon=ft.Icons.SHARE,
                                           on_click=lambda e: self.app.page.run_task(self.app.share_file, record.path)))
         if record.chat_id is not None:
