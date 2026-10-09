@@ -273,3 +273,68 @@ def test_history_offers_play_for_videos(app, tmp_path):
     row = app.history.list.controls[-1]
     menu = row.content.controls[-1]
     assert [i.content for i in menu.items][:2] == ["Play", "Share"]
+
+
+async def test_settings_backup_export_and_import(app, tmp_path, monkeypatch):
+    from tgdl.backup import loads
+    from tgdl.links.rules import LinkRule
+
+    st = app.state
+    st.cfg.api_id, st.cfg.api_hash = 25073761, "0123456789abcdef0123456789abcdef"
+    st.rules.add(LinkRule(id="mirror", pattern="mysite.com/{channel}/{msg}"))
+    st.library.add(LibraryEntry(chat_id=-1001, title="Movies"))
+
+    async def no_dialog(**kw):
+        raise RuntimeError("no system dialog here")
+
+    monkeypatch.setattr(app.file_picker, "save_file", no_dialog)
+    path = await app.settings.backup.export(password="pw")
+    assert path and path.startswith(st.manager.downloads_dir) and "tg-downloader-backup" in path
+    raw = open(path, "rb").read()
+    assert b"0123456789abcdef" not in raw
+    assert loads(raw, "pw").rule_count == 1
+
+    # a fresh phone: nothing set up yet
+    st.cfg.api_id, st.cfg.api_hash = 0, ""
+    st.rules.remove("mirror")
+    st.library.remove(-1001)
+    calls = []
+
+    async def set_creds(api_id, api_hash):
+        calls.append((api_id, api_hash))
+
+    async def not_yet():
+        return False
+
+    async def nothing():
+        return None
+
+    monkeypatch.setattr(st.session, "set_api_credentials", set_creds)
+    monkeypatch.setattr(st.session, "is_authorized", not_yet)
+    monkeypatch.setattr(app, "on_login_changed", nothing)
+    opened = []
+    monkeypatch.setattr(app, "open_login", lambda *a: opened.append(1))
+
+    await app.settings.backup.read(raw)              # asks for the password first
+    dialog = app.page.show_dialog.call_args[0][0]
+    dialog.content.value = "pw"
+    await dialog.actions[1].on_click(None)
+    confirm = app.page.show_dialog.call_args[0][0]
+    assert "Import" in confirm.title.value
+    await confirm.actions[1].on_click(None)
+
+    assert calls == [(25073761, "0123456789abcdef0123456789abcdef")]
+    assert st.rules.get("mirror") is not None and -1001 in st.library
+    assert "Imported" in toast(app) and opened == [1]   # still needs the one-time phone login
+
+
+async def test_backup_wrong_password_asks_again(app):
+    from tgdl.backup import dumps, make_backup
+
+    raw = dumps(make_backup(app.state.cfg), password="right")
+    await app.settings.backup.read(raw)
+    dialog = app.page.show_dialog.call_args[0][0]
+    dialog.content.value = "wrong"
+    await dialog.actions[1].on_click(None)
+    again = app.page.show_dialog.call_args[0][0]
+    assert again.content.error == "Wrong password, or the file was changed."

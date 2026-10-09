@@ -13,6 +13,7 @@ from tgdl.config import GB, parse_channel
 from tgdl.diagnostics import writable_dir
 
 from ..widgets import muted, safe_update, section
+from .backup import BackupFlow
 
 if TYPE_CHECKING:
     from ..app import App
@@ -25,6 +26,7 @@ HEIGHT_OPTIONS = [("360", "360p"), ("480", "480p"), ("720", "720p"), ("1080", "1
 class SettingsView:
     def __init__(self, app: "App"):
         self.app = app
+        self.backup = BackupFlow(app)
         cfg = app.state.cfg
 
         # account
@@ -88,6 +90,12 @@ class SettingsView:
                 section("Telegram account"),
                 self.account_text,
                 ft.Row([self.account_btn, self.logout_btn], spacing=8, wrap=True),
+                ft.Divider(),
+                section("Backup"),
+                muted("Move your API ID and hash, settings, link rules and library to another phone, or keep them safe "
+                      "before reinstalling. The Telegram login itself is never exported.", size=12),
+                ft.Row([ft.OutlinedButton("Export", icon=ft.Icons.UPLOAD_FILE, on_click=lambda e: self.backup.open_export()),
+                        ft.OutlinedButton("Import", icon=ft.Icons.DOWNLOAD, on_click=self._on_import)], spacing=8, wrap=True),
                 ft.Divider(),
                 section("Storage"),
                 self.dir_row,
@@ -209,6 +217,9 @@ class SettingsView:
         self.app.state.manager.downloads_dir_override = None
         self._save()
         self._show_dir_status()
+
+    async def _on_import(self, e: ft.Event) -> None:
+        await self.backup.open_import()
 
     async def _pick_dir(self, e: ft.Event) -> None:
         picked = await self.app.pick_folder()

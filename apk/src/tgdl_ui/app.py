@@ -300,6 +300,16 @@ class App:
         self.push("Settings", self.settings.root, owner=self.settings)
         self.settings.on_show()
 
+    def settings_reloaded(self) -> None:
+        """Settings changed underneath the screens (backup import): rebuild the settings page from the new values."""
+        was_open = self.top_owner() is self.settings
+        self.settings = SettingsView(self)
+        self.more.hide_switch.value = self.state.cfg.nomedia
+        self.library.render()
+        if was_open:
+            self.back()
+            self.open_settings()
+
     def open_rules(self) -> None:
         self.push("Link rules", RulesView(self).root)
 

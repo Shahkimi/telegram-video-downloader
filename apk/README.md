@@ -78,6 +78,15 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
 the whole queue; each row has its own menu with *Pause/Resume*, *Move to top*, *Cancel*, *Try again*, *Share* and
 *Open channel*. Telegram cannot continue a half-finished file, so a paused download starts that file over when resumed.
 
+### Backing up your settings
+
+*More > Settings > Backup > Export* saves one file with your API ID and hash, all settings, link rules and the Library
+(chats with their folder and *Hide* choices). Pick what to include and, if the API hash is in it, set a password: the file
+is then encrypted (AES-256 with a key derived from the password) and a wrong password or a changed file is refused.
+*Import* on another phone or after reinstalling reads it back: settings and rules are replaced, Library chats are added,
+and folders that do not exist on the new phone are skipped. The Telegram login is never exported, so you log in once
+with your phone number after importing.
+
 ## Downloading
 
 ### From links (Browse > Links)
