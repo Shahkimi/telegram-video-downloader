@@ -1,4 +1,4 @@
-"""Download tab: paste links, see what they mean, add them to the queue."""
+"""Links section of Browse: paste links, see what they mean, add them to the download queue."""
 from __future__ import annotations
 
 import logging
@@ -11,7 +11,7 @@ from tgdl.links.router import route
 from tgdl.telegram.resolve import MediaFilter, Note, resolve_targets
 from tgdl.telegram.session import LoginError
 
-from ..widgets import banner, muted, title
+from ..widgets import banner, muted
 
 if TYPE_CHECKING:
     from ..app import App
@@ -53,7 +53,6 @@ class DownloadView:
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             spacing=12,
             controls=[
-                title("Download"),
                 self.login_banner,
                 self.field,
                 ft.Row(
@@ -141,8 +140,8 @@ class DownloadView:
             span = f"message {ids[0]}" if len(ids) == 1 else f"messages {ids[0]} to {ids[-1]} ({len(ids)})"
             rows.append(self._line(ft.Icons.SEND, ft.Colors.PRIMARY, f"Telegram {t.peer}: {span}"))
         for c in routed.channels:
-            scan = ft.TextButton("Scan", on_click=lambda e, peer=c.peer: self.app.scan_peer(peer))
-            rows.append(self._line(ft.Icons.FORUM, ft.Colors.TERTIARY, f"Whole channel {c.peer}: use Scan to list its videos", scan))
+            scan = ft.TextButton("Open", on_click=lambda e, peer=c.peer: self.app.scan_peer(peer))
+            rows.append(self._line(ft.Icons.FORUM, ft.Colors.TERTIARY, f"Whole channel {c.peer}: open it to pick what to download", scan))
         for ext in routed.external:
             rows.append(self._line(ft.Icons.LANGUAGE, ft.Colors.TERTIARY, f"Website video: {ext.url}"))
         for bad in routed.unmatched:
@@ -216,11 +215,11 @@ class DownloadView:
             self.render_notes(notes)
             if items:
                 self.app.toast(f"Added {len(items)} download{'s' if len(items) != 1 else ''}", action="Queue",
-                               on_action=lambda e: self.app.show("queue"))
+                               on_action=lambda e: self.app.open_queue())
                 if not notes or all(n.level == "ok" for n in notes):
                     self.field.value = ""
                 if auto:
-                    self.app.show("queue")
+                    self.app.open_queue()
             else:
                 self.app.toast("Nothing could be added. See the details below.", error=True)
         except LoginError as exc:

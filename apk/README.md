@@ -4,7 +4,12 @@ An Android app that downloads videos and files from Telegram (private channels, 
 own account) and videos from other websites. It is the phone version of the command-line downloader in this repository
 and shares the same download engine.
 
-- **Telegram**: log in with your own API ID, paste or share links, or pick a whole channel and download every video in it.
+- **Laid out like Tachiyomi**: a Library of the channels you follow (cover grid with downloaded and new counts), Updates,
+  History, Browse and More along the bottom, and a page per channel that lists its videos like chapters.
+- **Telegram**: log in with your own API ID, paste or share links, pick single videos from a channel, or download all of it.
+- **Download manager**: pause, resume, reorder, cancel and retry; choose where files are saved, globally or per channel.
+- **Hide from the gallery**: one switch puts a `.nomedia` file in the download folder (or in one channel's folder) so
+  Gallery and Photos leave those videos alone.
 - **Add your own link formats**: teach the app about links it does not know yet (see [Link rules](#link-rules)).
 - **Share to download**: use Android's Share button, the text-selection menu, or just copy a link in Telegram.
 - **Other websites**: YouTube, TikTok, Instagram, X and hundreds more through [yt-dlp](https://github.com/yt-dlp/yt-dlp).
@@ -14,7 +19,7 @@ and shares the same download engine.
 > **Status.** The app is built and tested on a computer (unit tests, the full interface in a browser, and a real APK
 > build). The Android-only pieces (share sheet, background service, saving into `Download/`) compile and follow
 > Android's documentation, but they have not been tried on a physical phone yet. See [Known limitations](#known-limitations).
-> Please open an issue if something misbehaves and attach the log from *Settings > Diagnostics > Share*.
+> Please open an issue if something misbehaves and attach the log from *More > Diagnostics > Share*.
 
 ## Install
 
@@ -41,9 +46,36 @@ Telegram requires every app to use its own API credentials, and they are free:
 The login is stored only inside the app's private storage on your phone. Android backup is switched off for the app, so
 it is not copied to Google Drive. *Settings > Log out* removes it.
 
+## The screens
+
+| Tab | What it does |
+|---|---|
+| **Library** | The chats you follow, as a grid of covers. The left badge counts downloaded files, the right one new posts. Long-press a cover for its folder, *Hide from gallery*, *Mark as seen* or *Remove*. The toolbar searches, sorts, switches grid/list and checks for new posts. |
+| **Updates** | New media in Library chats since you last opened them, grouped by day. Tap the arrow to download one, or the download button at the top for all of them. Checked when you open the tab (at most every 15 minutes) or with the refresh button. |
+| **History** | Every finished download, newest first. Share it, open its chat, delete the file, or forget missing files. |
+| **Browse** | *Chats*: all your channels and groups with search and category chips; the heart adds one to the Library, a tap opens it. *Links*: paste links (see below). |
+| **More** | The *Hide downloads from gallery* switch, the **Download queue**, Settings, Link rules, Diagnostics and About. |
+
+### A channel page
+
+Opening a chat shows its cover, name and download folder, four buttons (*Add to library*, *Folder*, *Hide*, *Get all*) and
+its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos*, *Files* or *Everything* with the chips.
+
+- The button on each row shows its state: download arrow, waiting clock, a progress ring while downloading (tap to pause),
+  a pause icon (tap to resume), a green check when it is on the phone, or a red error (tap to retry).
+- Tap a row for details (caption, size, where it was saved) with Download, Share and Delete.
+- Long-press a row to select several, then use the floating *Download* button. The toolbar has *Select all* and *Invert*.
+- *Get all* (or the download menu) scans the whole chat and queues everything that is not downloaded or queued yet.
+
+### Download queue
+
+*More > Download queue* lists running, waiting, paused and finished downloads. The pause button in the toolbar pauses
+the whole queue; each row has its own menu with *Pause/Resume*, *Move to top*, *Cancel*, *Try again*, *Share* and
+*Open channel*. Telegram cannot continue a half-finished file, so a paused download starts that file over when resumed.
+
 ## Downloading
 
-### From links (Download tab)
+### From links (Browse > Links)
 
 Paste one or many links, one per line or separated by spaces, and tap **Add to queue**. **Check links** shows how each
 one is understood without downloading anything. The filter chooses whether Telegram posts are saved as everything,
@@ -59,7 +91,7 @@ Understood out of the box:
 | `https://t.me/c/1234567890/12/456` | message 456 inside forum topic 12 |
 | `https://web.telegram.org/k/#-1001234567890/456` | Telegram Web links |
 | `tg://privatepost?channel=1234567890&post=456`, `tg://resolve?domain=username&post=456` | deep links |
-| `https://t.me/username` | a whole channel: offered as a scan on the Channels tab |
+| `https://t.me/username` | a whole channel: offered as *Open*, which shows its page |
 | `456` or `456-460` | bare message numbers, when a *Default channel* is set in Settings |
 | any other `http(s)` link | handed to yt-dlp when *Other websites* is switched on |
 
@@ -80,28 +112,41 @@ internal chat picker, so *Copy link* is the way to go for Telegram posts.
 By default a shared link starts downloading straight away. *Settings > Start right away when I share a link* turns that
 into a confirmation step.
 
-### Whole channels (Channels tab)
+### Whole channels
 
-Pick a channel or group from your chats (grouped as private/public channels and groups, with search), or type a channel id or
-`@username`. The app scans the messages, tells you how many videos it found and how big they are, and asks before it
-queues them. The *Max size per channel scan* setting protects your storage.
-
-### Queue
-
-Every file shows its progress, speed and time left. You can cancel a file, retry a failed one, clear finished ones and
-share a finished file to any app. Files with the same name and size as an existing file are skipped, and files with the
+Open the chat from *Browse* (or type its id or `@username` there) and tap *Get all*. The app scans the messages, tells
+you how many files it found and how big they are, and asks before it queues them. The *Max size per channel scan*
+setting protects your storage. Files with the same name and size as an existing file are skipped, and files with the
 same name but different content get the message number added to their name.
 
 ## Where files go
 
-`Download/Telegram Downloads/` in your phone's storage, so they show up in the Files app and in Gallery. If Android
-refuses to let the app write there, the app falls back to its own folder (`Android/data/<app>/files/`) and tells you.
-You can change the folder in Settings.
+By default `Download/Telegram Downloads/<channel name>/` in your phone's storage, so they show up in the Files app.
+If Android refuses to let the app write there, the app falls back to its own folder (`Android/data/<app>/files/`) and
+tells you.
+
+- **Another folder**: *Settings > Storage* has a folder picker. Folders outside `Download/` (or on an SD card) need
+  **All files access**, which Android 11+ grants in its own settings screen; the app opens it for you. That permission is
+  fine for an APK installed from GitHub; Google Play would ask for a justification.
+- **One folder per channel** can be switched off in *Settings > Storage* to put everything in one folder.
+- **A folder for one channel**: on its page tap *Folder* (or long-press its Library cover). New downloads go there;
+  files already saved are not moved.
+
+### Hiding downloads from the gallery (.nomedia)
+
+- *More > Hide downloads from gallery* (also in *Settings > Storage*) writes an empty `.nomedia` file into the main
+  download folder. Android's media scanner then skips that folder and everything inside it.
+- *Hide* on a channel page does the same for that channel's folder only. The channel joins the Library so the choice is
+  remembered, and new downloads into that folder get the marker too.
+- After a change the app asks Android to re-scan the affected files, so they disappear from (or come back to) Gallery and
+  Photos. Some gallery apps keep their own cache for a while; clearing that app's cache helps if a video still shows.
+  Nothing is deleted or moved, and file managers still show the files.
+- When the main folder is hidden, a single channel cannot be shown again on its own (`.nomedia` covers subfolders).
 
 ## Link rules
 
 A rule says "links that look like *this* mean *that*". Use it for mirrors, bots or sites that wrap Telegram links.
-Create one in *Settings > Link rules > Add rule*, or share the same file with the command-line tool
+Create one in *More > Link rules > Add rule*, or share the same file with the command-line tool
 (`link_rules.json`, menu 5 in `downloader.py`).
 
 Write the pattern like the link, with placeholders where parts change:
@@ -150,7 +195,7 @@ Android 15 limits this kind of service to about six hours a day.
 
 ## Speed
 
-Telegram encrypts downloads, so decryption speed matters. *Settings > Diagnostics* shows the AES backend: `openssl-ctypes`
+Telegram encrypts downloads, so decryption speed matters. *More > Diagnostics* shows the AES backend: `openssl-ctypes`
 (or `cryptg`) is fast; `cryptography` or `pyaes` means downloads will be slow. *Run speed test* measures it. If
 files fail often, lower *Connections per file* or *Files at the same time* in Settings.
 
@@ -161,6 +206,7 @@ files fail often, lower *Connections per file* or *Files at the same time* in Se
 - YouTube works with limited quality on Android (no ffmpeg or JavaScript runtime). The desktop tool does better when
   `ffmpeg` and `node` are installed.
 - Android 15 limits download services to about six hours a day.
+- Pausing a Telegram download restarts that file from the beginning when it resumes.
 - Only 64-bit ARM is built by default (see below for other architectures).
 
 ## Building the APK yourself
@@ -214,11 +260,13 @@ keytool -genkeypair -v -keystore $env:USERPROFILE\.android\tgdl-upload.jks -alia
 you push a tag:
 
 ```bash
-git tag v3.0.0
-git push <your-fork> v3.0.0
+git tag v3.1.0
+git push <your-fork> v3.1.0
 ```
 
-Run it by hand from the *Actions* tab to get a test APK as a downloadable artifact without making a release. To sign
+Every push to the `android-app` branch (touching `apk/`) also builds a test APK; download it from the run's
+*Artifacts* section in the *Actions* tab. You can also run the workflow by hand there once the workflow file is on the
+default branch. To sign
 release builds, add these repository secrets: `ANDROID_KEYSTORE_BASE64` (the `.jks` file encoded with base64),
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_PASSWORD`, `ANDROID_KEY_ALIAS`. Without them the APK is debug-signed and the
 workflow prints a warning.
@@ -228,8 +276,10 @@ workflow prints a warning.
 ```
 apk/
   src/main.py            Flet entry point
-  src/tgdl/              download engine, link router, rules, Telegram session (no UI code; also used by downloader.py)
-  src/tgdl_ui/           the Flet interface (app shell, views, native bridge)
+  src/tgdl/              download engine, link router, rules, Telegram session, library/history stores,
+                         storage helpers (.nomedia) and media browsing (no UI code; also used by downloader.py)
+  src/tgdl_ui/           the Flet interface: app shell and tabs (library, updates, history, browse, more),
+                         channel page, download queue, settings, native bridge
   extensions/flet-tgdl-native/   Kotlin plugin: share target, foreground service, media scan, permissions
   tests/                 pytest
   scripts/               build_apk.ps1, check_no_secrets.py, prepare_wheels.py, dns_fix_proxy.py

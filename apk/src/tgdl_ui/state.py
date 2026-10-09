@@ -7,10 +7,13 @@ from typing import Any
 
 from tgdl import __version__, netfix
 from tgdl.config import AppConfig, JsonConfigStore
-from tgdl.engine.manager import DownloadManager
+from tgdl.engine.manager import DownloadManager, Placement
+from tgdl.engine.models import DownloadItem
+from tgdl.library import History, Library, LibraryEntry
 from tgdl.links.rules import RuleSet
 from tgdl.logs import setup_logging
 from tgdl.paths import AppPaths, resolve_paths
+from tgdl.storage import channel_dir
 from tgdl.telegram.dialogs import DialogInfo
 from tgdl.telegram.session import TelegramSession
 
@@ -32,8 +35,12 @@ class AppState:
         self.session = TelegramSession(self.paths, self.store, device_model="TG Downloader", app_version=__version__)
         self.sink = UiSink()
         self.manager = DownloadManager(self.session, self.cfg, self.paths, self.sink)
+        self.manager.placer = self.place
+        self.library = Library.load(self.paths.data_dir / "library.json")
+        self.history = History.load(self.paths.data_dir / "history.json")
 
         self.dialogs: list[DialogInfo] | None = None
+        self.entities: dict[int, Any] = {}      # chat id -> Telethon entity, filled while browsing
         self.pending_shares: list[str] = []
         self.last_clipboard_seen = ""
         self.active_app: Any = None
@@ -51,6 +58,40 @@ class AppState:
     def reload_rules(self) -> RuleSet:
         self.rules = RuleSet.load(self.paths.rules_file)
         return self.rules
+
+    def save_library(self) -> None:
+        try:
+            self.library.save()
+        except OSError:
+            log.exception("cannot save the library")
+
+    def save_history(self) -> None:
+        try:
+            self.history.save()
+        except OSError:
+            log.exception("cannot save the history")
+
+    # ---- where files go -----------------------------------------------------
+    def folder_for(self, chat_id: int | None, title: str) -> str:
+        """The folder a chat's downloads go to: its own choice, else the per-channel default."""
+        entry = self.library.get(chat_id)
+        if entry is not None and entry.folder:
+            return entry.folder
+        root = self.manager.downloads_dir
+        return channel_dir(root, title) if (self.cfg.per_channel_folders and title) else root
+
+    def place(self, item: DownloadItem) -> Placement | None:
+        entry = self.library.get(item.chat_id)
+        if entry is None:
+            return None
+        return Placement(self.folder_for(entry.chat_id, item.chat_title or entry.title), nomedia=entry.nomedia)
+
+    def add_to_library(self, chat_id: int, title: str, username: str | None = None, category: str = "",
+                       last_seen_id: int = 0) -> LibraryEntry:
+        entry = self.library.add(LibraryEntry(chat_id=chat_id, title=title, username=username, category=category,
+                                              last_seen_id=last_seen_id))
+        self.save_library()
+        return entry
 
     # ---- event loop -------------------------------------------------------
     async def bind_loop(self) -> None:

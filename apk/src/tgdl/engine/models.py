@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 class ItemState(str, Enum):
     QUEUED = "queued"
+    PAUSED = "paused"                   # held back by the user; resume() puts it back in the queue
     RESOLVING = "resolving"
     DOWNLOADING = "downloading"
     DONE = "done"
@@ -38,6 +39,9 @@ class DownloadItem:
     source: str = ""                    # the link or channel it came from
     message: Any = None                 # telegram: the Telethon message
     peer: Any = None                    # telegram: the chat entity
+    chat_id: int | None = None          # telegram: marked peer id (-100... for channels)
+    chat_title: str = ""                # telegram: chat name, used for the per-channel folder
+    folder: str | None = None           # where the file goes; None = decided by the manager when it starts
     url: str | None = None              # ytdlp
     started_at: float | None = None
     finished_at: float | None = None
@@ -55,6 +59,10 @@ class DownloadItem:
     @property
     def display_name(self) -> str:
         return self.filename or self.title or self.url or self.id
+
+    @property
+    def msg_id(self) -> int | None:
+        return getattr(self.message, "id", None)
 
 
 @dataclass

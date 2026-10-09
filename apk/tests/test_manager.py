@@ -289,3 +289,114 @@ async def test_same_caption_in_one_batch_gets_distinct_files(tmp_path, monkeypat
     names = sorted(os.listdir(tmp_path))
     assert len(names) == 3, names
     assert reserved == set()
+
+
+# ---- pause, resume, reorder and where files go ------------------------------------------------
+
+def _slow_download(log=None):
+    async def slow(client, item, directory, sink, **kw):
+        if log is not None:
+            log.append((item.index, directory))
+        item.state = ItemState.DOWNLOADING
+        sink.started(item)
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            item.state = ItemState.CANCELLED
+            sink.finished(item)
+            raise
+        item.state, item.path = ItemState.DONE, os.path.join(directory, item.filename)
+        sink.finished(item)
+        return True
+    return slow
+
+
+async def test_pause_and_resume_one_item(paths, monkeypatch):
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download())
+    mgr = make(paths, max_concurrent_files=1)
+    a, b = mgr.enqueue_telegram(resolved(2))
+    await asyncio.sleep(0.01)
+    mgr.pause(b.id)                       # waiting item: just held back
+    assert b.state is ItemState.PAUSED
+    mgr.pause(a.id)                       # running item: stopped, comes back as paused
+    await asyncio.wait_for(mgr.wait_idle(), 2)
+    assert a.state is ItemState.PAUSED and a.done == 0
+    assert not mgr.busy
+    mgr.resume(a.id)
+    mgr.resume(b.id)
+    await asyncio.wait_for(mgr.wait_idle(), 2)
+    assert a.state is ItemState.DONE and b.state is ItemState.DONE
+
+
+async def test_pause_all_requeues_running_items_first(paths, monkeypatch):
+    order = []
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download(order))
+    mgr = make(paths, max_concurrent_files=1)
+    busy = []
+    mgr.on_busy_change = busy.append
+    items = mgr.enqueue_telegram(resolved(3))
+    await asyncio.sleep(0.01)
+    mgr.pause_all()
+    await asyncio.wait_for(mgr.wait_idle(), 2)   # a paused queue counts as idle
+    assert mgr.paused and not mgr.busy and busy[-1] is False
+    assert [i.state for i in items] == [ItemState.QUEUED] * 3
+    assert [i.index for i in mgr.waiting()] == [1, 2, 3]
+    mgr.resume_all()
+    await asyncio.wait_for(mgr.wait_idle(), 2)
+    assert all(i.state is ItemState.DONE for i in items)
+    assert [n for n, _ in order] == [1, 1, 2, 3]  # the interrupted file started over first
+
+
+async def test_move_to_top(paths, monkeypatch):
+    order = []
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download(order))
+    mgr = make(paths, max_concurrent_files=1)
+    items = mgr.enqueue_telegram(resolved(4))
+    mgr.move_to_top(items[3].id)
+    await asyncio.wait_for(mgr.wait_idle(), 3)
+    assert [n for n, _ in order][:2] == [1, 4]
+
+
+async def test_files_go_to_a_folder_per_channel(paths, monkeypatch):
+    from types import SimpleNamespace
+
+    dirs = []
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download(dirs))
+    mgr = make(paths, per_channel_folders=True)
+    chan = SimpleNamespace(title="My: Channel")
+    mgr.enqueue_telegram([ResolvedMsg(FakeMessage(id=1, text="v"), chan, "src")])
+    mgr.enqueue_telegram(resolved(1))  # entity without a title: main folder
+    await mgr.wait_idle()
+    root = str(paths.default_downloads_dir)
+    assert dirs == [(1, os.path.join(root, "My Channel")), (1, root)]
+    assert mgr.items[0].chat_title == "My: Channel" and mgr.items[0].folder == os.path.join(root, "My Channel")
+
+    dirs.clear()
+    mgr.cfg = AppConfig(per_channel_folders=False)
+    mgr.enqueue_telegram([ResolvedMsg(FakeMessage(id=2, text="v"), chan, "src")])
+    await mgr.wait_idle()
+    assert dirs == [(1, root)]
+
+
+async def test_placer_and_nomedia(paths, monkeypatch, tmp_path):
+    from tgdl.engine.manager import Placement
+
+    dirs = []
+    monkeypatch.setattr(manager_mod, "download_message", _slow_download(dirs))
+    mgr = make(paths, nomedia=True)
+    own = tmp_path / "own"
+    mgr.placer = lambda item: Placement(str(own), nomedia=True) if item.index == 1 else None
+    mgr.enqueue_telegram(resolved(2))
+    await mgr.wait_idle()
+    assert dirs[0] == (1, str(own))
+    assert (own / ".nomedia").exists()
+    assert (paths.default_downloads_dir / ".nomedia").exists()  # the global switch marks the main folder
+
+    def broken(item):
+        raise RuntimeError("bad setting")
+
+    dirs.clear()
+    mgr.placer = broken
+    mgr.enqueue_telegram(resolved(1))
+    await mgr.wait_idle()
+    assert dirs == [(1, str(paths.default_downloads_dir))]

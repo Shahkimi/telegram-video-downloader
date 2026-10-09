@@ -1,4 +1,4 @@
-"""Settings tab: account, folders, speed, other sites, Android behaviour, link rules, diagnostics."""
+"""Settings (More > Settings): account, storage, speed, other sites, Android behaviour."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from tgdl import __version__
 from tgdl.config import GB, parse_channel
 from tgdl.diagnostics import writable_dir
 
-from ..widgets import muted, section, title
+from ..widgets import muted, safe_update, section
 
 if TYPE_CHECKING:
     from ..app import App
@@ -34,8 +34,15 @@ class SettingsView:
 
         # downloads
         self.dir_field = ft.TextField(label="Download folder", value=cfg.downloads_dir or str(app.state.paths.default_downloads_dir),
-                                      dense=True, on_submit=self._save_dir, on_blur=self._save_dir)
+                                      dense=True, expand=True, on_submit=self._save_dir, on_blur=self._save_dir)
+        self.dir_row = ft.Row([self.dir_field, ft.IconButton(ft.Icons.FOLDER_OPEN, tooltip="Choose folder", on_click=self._pick_dir),
+                               ft.IconButton(ft.Icons.RESTART_ALT, tooltip="Back to the default folder", on_click=self._reset_dir)],
+                              vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=0)
         self.dir_status = muted("")
+        self.access_text = muted("", size=12)
+        self.access_btn = ft.OutlinedButton("Allow All files access", icon=ft.Icons.SD_STORAGE, on_click=self._on_access, visible=False)
+        self.per_channel = ft.Switch(label="A folder for each channel", value=cfg.per_channel_folders, on_change=self._toggle("per_channel_folders"))
+        self.nomedia = ft.Switch(label="Hide downloads from the gallery (.nomedia)", value=cfg.nomedia, on_change=self._on_nomedia)
         self.max_gb = ft.TextField(label="Max size per channel scan (GB)", value=f"{cfg.max_total_size_bytes / GB:g}",
                                    keyboard_type=ft.KeyboardType.NUMBER, dense=True, on_blur=self._save_max_gb, on_submit=self._save_max_gb)
         self.default_channel = ft.TextField(label="Default channel (optional)", value="" if cfg.default_channel is None else str(cfg.default_channel),
@@ -78,14 +85,20 @@ class SettingsView:
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             spacing=10,
             controls=[
-                title("Settings"),
                 section("Telegram account"),
                 self.account_text,
                 ft.Row([self.account_btn, self.logout_btn], spacing=8, wrap=True),
                 ft.Divider(),
-                section("Downloads"),
-                self.dir_field,
+                section("Storage"),
+                self.dir_row,
                 self.dir_status,
+                self.access_text,
+                self.access_btn,
+                self.per_channel,
+                self.nomedia,
+                muted("Each chat can also get its own folder or be hidden on its own: open it and use Folder or Hide.", size=12),
+                ft.Divider(),
+                section("Downloads"),
                 self.max_gb,
                 self.default_channel,
                 self.skip_existing,
@@ -102,11 +115,6 @@ class SettingsView:
                       "so the best quality may not be available.", size=12),
                 ft.Divider(),
                 self.android_box,
-                section("Tools"),
-                ft.ListTile(leading=ft.Icon(ft.Icons.RULE), title=ft.Text("Link rules"), subtitle=ft.Text("Teach the app new kinds of links"),
-                            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT), on_click=lambda e: self.app.open_rules()),
-                ft.ListTile(leading=ft.Icon(ft.Icons.BUG_REPORT), title=ft.Text("Diagnostics"), subtitle=ft.Text("Speed check, versions, logs"),
-                            trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT), on_click=lambda e: self.app.open_diagnostics()),
                 muted(f"TG Downloader {__version__}", size=12),
                 ft.Container(height=16),
             ],
@@ -120,15 +128,26 @@ class SettingsView:
                            options=[ft.DropdownOption(key=v, text=v) for v in values], on_select=handler)
 
     def _update(self) -> None:
-        try:
-            self.root.update()
-        except Exception:  # noqa: BLE001
-            pass
+        safe_update(self.root)
+
+    def on_close(self) -> None:
+        pass
 
     # ---- showing ------------------------------------------------------------------------------
     def on_show(self) -> None:
+        self.nomedia.value = self.app.state.cfg.nomedia
         self.app.page.run_task(self.refresh_account)
+        self.app.page.run_task(self.refresh_access)
         self._show_dir_status()
+
+    async def refresh_access(self) -> None:
+        if not self.app.state.paths.is_android:
+            return
+        granted = await self.app.native.has_all_files_access()
+        self.access_btn.visible = not granted
+        self.access_text.value = ("All files access: allowed. Any folder can be used." if granted else
+                                  "All files access is off: only the Download folder works. Allow it to pick another folder or an SD card.")
+        self._update()
 
     async def refresh_account(self) -> None:
         session = self.app.state.session
@@ -190,6 +209,25 @@ class SettingsView:
         self.app.state.manager.downloads_dir_override = None
         self._save()
         self._show_dir_status()
+
+    async def _pick_dir(self, e: ft.Event) -> None:
+        picked = await self.app.pick_folder()
+        if picked:
+            self.dir_field.value = picked
+            self._save_dir(e)
+            self.app.toast(f"Downloads now go to {picked}")
+
+    def _reset_dir(self, e: ft.Event) -> None:
+        self.dir_field.value = str(self.app.state.paths.default_downloads_dir)
+        self._save_dir(e)
+        self._update()
+
+    async def _on_access(self, e: ft.Event) -> None:
+        await self.app.request_all_files_access()
+        await self.refresh_access()
+
+    async def _on_nomedia(self, e: ft.Event) -> None:
+        await self.app.set_download_root_hidden(bool(self.nomedia.value))
 
     def _save_max_gb(self, e: ft.Event) -> None:
         try:

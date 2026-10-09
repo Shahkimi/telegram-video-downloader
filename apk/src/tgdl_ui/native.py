@@ -71,6 +71,20 @@ class Native:
     async def scan_file(self, path: str) -> None:
         await self._call("scan_file", path)
 
+    async def scan_files(self, paths: list[str]) -> None:
+        for start in range(0, len(paths), 200):
+            await self._call("scan_files", paths[start:start + 200])
+
+    async def has_all_files_access(self) -> bool:
+        """True on desktop: there is nothing to ask for."""
+        if not self.available:
+            return True
+        return bool(await self._call("has_all_files_access", default=False))
+
+    async def request_all_files_access(self) -> str:
+        """'granted', 'asked' (Android's settings screen is open) or 'failed'."""
+        return str(await self._call("request_all_files_access", default="failed") or "failed")
+
     async def sdk_int(self) -> int:
         return int(await self._call("sdk_int", default=0) or 0)
 

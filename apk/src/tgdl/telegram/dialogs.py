@@ -43,6 +43,18 @@ def classify(entity: Any) -> ChatCategory | None:
     return None
 
 
+def peer_id(entity: Any) -> int | None:
+    """Telegram's marked id for a chat (-100... for channels), or None when it cannot be worked out."""
+    if entity is None:
+        return None
+    try:
+        from telethon import utils
+
+        return utils.get_peer_id(entity)
+    except Exception:  # noqa: BLE001 - not an entity Telethon understands
+        return None
+
+
 async def list_dialogs(client: Any, category: ChatCategory | None = None) -> list[DialogInfo]:
     """All matching chats, sorted A-Z ignoring case."""
     found: list[DialogInfo] = []

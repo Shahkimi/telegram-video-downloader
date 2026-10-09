@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flet-tgdl-native"
-version = "3.0.0"
+version = "3.1.0"
 description = "Android helpers for TG Downloader: share target, keep-alive foreground service, media scan, permissions."
 readme = "README.md"
 requires-python = ">=3.10"

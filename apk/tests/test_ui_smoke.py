@@ -34,19 +34,27 @@ def last_toast(app: App) -> str:
 
 
 def test_every_tab_renders(app):
+    assert TAB_KEYS == ["library", "updates", "history", "browse", "more"]
     for key in TAB_KEYS:
         app.show(key)
         assert app.body.content is app.views[key].root
         assert app.nav.selected_index == TAB_KEYS.index(key)
+        assert app.page.appbar is app.views[key].appbar
 
 
-def test_panels_render(app):
+def test_pages_stack_and_close(app):
+    app.page.views = [object()]
     app.open_rules()
-    assert app.current == "panel"
     app.open_diagnostics()
-    assert app.current == "panel"
+    assert app.current == "panel" and len(app._stack) == 2 and len(app.page.views) == 3
+    app.back()
+    assert len(app._stack) == 1 and app.current == "panel"
+    app._on_view_pop(ft.ViewPopEvent(name="view_pop", control=app.page, route="/page1", view=app._stack[0][0]))
+    assert not app._stack and app.current == app.tab and len(app.page.views) == 1
     app.show("settings")
-    assert app.current == "settings"
+    assert app.current == "panel" and app.top_owner() is app.settings
+    app.show("history")  # switching tabs closes pages on top
+    assert not app._stack and app.current == "history"
 
 
 def test_toast_shows_error_and_action(app):
@@ -65,7 +73,7 @@ def test_toast_shows_error_and_action(app):
 
 async def test_incoming_text_without_a_link(app):
     await app.handle_incoming("hello there, nothing to see")
-    assert app.current == "download"
+    assert app.current == "browse" and app.browse.section == "links"
     assert "No supported link" in last_toast(app)
 
 

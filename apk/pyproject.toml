@@ -1,6 +1,6 @@
 [project]
 name = "tgdl"
-version = "3.0.0"
+version = "3.1.0"
 description = "Telegram and web video downloader: CLI core plus Android app"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -44,6 +44,9 @@ requestLegacyExternalStorage = "true"
 
 [tool.flet.android.permission]
 "android.permission.WRITE_EXTERNAL_STORAGE" = { maxSdkVersion = "29" }
+# Android 11+: "All files access", so downloads can go to any folder the user picks (and .nomedia can be written there).
+# Fine for an APK installed from GitHub; Google Play would ask for a justification.
+"android.permission.MANAGE_EXTERNAL_STORAGE" = true
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.WAKE_LOCK" = true
 "android.permission.FOREGROUND_SERVICE" = true

@@ -144,7 +144,7 @@ Download folder, size budget, files at once, connections per file, default chann
 
 ## 📱 Android App
 
-The `apk/` folder contains the same downloader as an Android app (login, batch download, links, files, link rules, share-to-download, background downloads). Download the APK from the Releases page or build it yourself; see [`apk/README.md`](apk/README.md) for installation, usage and build instructions.
+The `apk/` folder contains the same downloader as an Android app with a Tachiyomi-style interface: a Library of followed channels, Updates, History, a page per channel to pick videos, a download manager (pause, resume, reorder), a choice of save folder (globally or per channel) and a `.nomedia` switch that hides downloads from the gallery. Download the APK from the Releases page or the GitHub Actions artifacts, or build it yourself; see [`apk/README.md`](apk/README.md) for installation, usage and build instructions.
 
 ---
 

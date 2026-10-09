@@ -43,6 +43,8 @@ class AppConfig:
     chunk_size_kb: int = 512
     skip_existing: bool = True
     range_cap: int = 1000
+    per_channel_folders: bool = True    # <downloads>/<channel title>/file
+    nomedia: bool = False               # .nomedia in the download folder hides everything from galleries
     ytdlp: YtdlpConfig = field(default_factory=YtdlpConfig)
     android: AndroidConfig = field(default_factory=AndroidConfig)
 
@@ -133,6 +135,8 @@ def config_from_dict(data: dict[str, Any]) -> AppConfig:
         chunk_size_kb=_int(data.get("chunk_size_kb"), base.chunk_size_kb, 4, 1024),
         skip_existing=_bool(data.get("skip_existing"), base.skip_existing),
         range_cap=_int(data.get("range_cap"), base.range_cap, 1, 100000),
+        per_channel_folders=_bool(data.get("per_channel_folders"), base.per_channel_folders),
+        nomedia=_bool(data.get("nomedia"), base.nomedia),
         ytdlp=YtdlpConfig(
             enabled=_bool(yt.get("enabled"), base.ytdlp.enabled),
             max_height=max_height,
@@ -277,6 +281,9 @@ class EnvConfigStore:
             "max_concurrent_files": get("MAX_CONCURRENT_FILES"),
             "parallel_connections": get("PARALLEL_CONNECTIONS"),
             "range_cap": get("RANGE_CAP"),
+            # The CLI always saved everything into one folder; keep that unless .env asks otherwise.
+            "per_channel_folders": get("PER_CHANNEL_FOLDERS") or "0",
+            "nomedia": get("NOMEDIA"),
         }
         yt = {
             "enabled": get("YTDLP_ENABLED"),
@@ -323,6 +330,8 @@ class EnvConfigStore:
             "MAX_CONCURRENT_FILES": str(cfg.max_concurrent_files),
             "PARALLEL_CONNECTIONS": str(cfg.parallel_connections),
             "RANGE_CAP": str(cfg.range_cap),
+            "PER_CHANNEL_FOLDERS": "1" if cfg.per_channel_folders else "0",
+            "NOMEDIA": "1" if cfg.nomedia else "0",
             "YTDLP_ENABLED": "1" if cfg.ytdlp.enabled else "0",
             "YTDLP_MAX_HEIGHT": str(cfg.ytdlp.max_height or 0),
             "YTDLP_COOKIES": cfg.ytdlp.cookies_file or "",

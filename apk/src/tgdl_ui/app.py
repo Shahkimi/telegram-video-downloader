@@ -1,4 +1,8 @@
-"""The app shell: navigation, toasts, incoming links, clipboard offer and the download ticker."""
+"""
+The app shell, laid out like Tachiyomi: Library, Updates, History, Browse and More along the bottom, and full-screen
+pages (a channel, the download queue, settings) pushed on top so Android's back gesture closes them.
+Also: toasts, incoming links, the clipboard offer and the download ticker.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -15,18 +19,26 @@ from tgdl.engine.models import DownloadItem, ItemState
 from tgdl.links.model import RouteResult
 from tgdl.links.router import route
 from tgdl.paths import DOWNLOAD_SUBDIR
-from tgdl.telegram.session import LoginError
+from tgdl.storage import NOMEDIA, hidden_by, media_files, set_nomedia
+from tgdl.telegram.browse import chat_cover, message_thumb
+from tgdl.telegram.dialogs import classify, peer_id
 from tgdl.util import format_speed
 
 from .native import Native
 from .state import AppState, get_state
-from .views.channels import ChannelsView
+from .views.browse import BrowseView
+from .views.channel import ChannelView
 from .views.diagnostics import DiagnosticsView
 from .views.download import DownloadView
+from .views.history import HistoryView
+from .views.library import LibraryView
 from .views.login import LoginDialog
+from .views.more import MoreView
 from .views.queue import QueueView
 from .views.rules import RulesView
 from .views.settings import SettingsView
+from .views.updates import UpdatesView
+from .widgets import safe_update
 
 log = logging.getLogger("tgdl.ui")
 
@@ -46,10 +58,11 @@ VIDEO_HOSTS = (
 )
 
 TABS = [
-    ("download", "Download", ft.Icons.DOWNLOAD_OUTLINED, ft.Icons.DOWNLOAD),
-    ("channels", "Channels", ft.Icons.FORUM_OUTLINED, ft.Icons.FORUM),
-    ("queue", "Queue", ft.Icons.LIST_ALT_OUTLINED, ft.Icons.LIST_ALT),
-    ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS),
+    ("library", "Library", ft.Icons.COLLECTIONS_BOOKMARK_OUTLINED, ft.Icons.COLLECTIONS_BOOKMARK),
+    ("updates", "Updates", ft.Icons.NEW_RELEASES_OUTLINED, ft.Icons.NEW_RELEASES),
+    ("history", "History", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY),
+    ("browse", "Browse", ft.Icons.EXPLORE_OUTLINED, ft.Icons.EXPLORE),
+    ("more", "More", ft.Icons.MORE_HORIZ_OUTLINED, ft.Icons.MORE_HORIZ),
 ]
 TAB_KEYS = [t[0] for t in TABS]
 
@@ -72,12 +85,16 @@ class App:
         self.page = page
         self.state = state
         state.active_app = self
-        self.current = "download"
+        self.tab = "library"
+        self.current = "library"
         self.visible = True
         self._toast_seq = 0
         self._batch: set[str] = set()
         self._asked_notifications = False
         self._native_failures = 0
+        self._stack: list[tuple[ft.View, Any]] = []     # pushed pages and the object behind each
+        self._covers: dict[int, bytes | None] = {}
+        self._history_dirty = False
 
         # Flet drops a service as soon as nothing references it, so these stay on the instance.
         self.clipboard = ft.Clipboard()
@@ -88,17 +105,22 @@ class App:
         self.native = Native(page, self.on_shared)
 
         self.download = DownloadView(self)
-        self.channels = ChannelsView(self)
         self.queue = QueueView(self)
+        self.library = LibraryView(self)
+        self.updates = UpdatesView(self)
+        self.history = HistoryView(self)
+        self.browse = BrowseView(self)
+        self.more = MoreView(self)
         self.settings = SettingsView(self)
         self.views: dict[str, Any] = {
-            "download": self.download,
-            "channels": self.channels,
-            "queue": self.queue,
-            "settings": self.settings,
+            "library": self.library,
+            "updates": self.updates,
+            "history": self.history,
+            "browse": self.browse,
+            "more": self.more,
         }
 
-        self.body = ft.Container(expand=True, padding=ft.Padding.only(left=16, right=16, top=8, bottom=0))
+        self.body = ft.Container(expand=True, padding=ft.Padding.only(left=16, right=16, top=0, bottom=0))
         self.nav = ft.NavigationBar(
             selected_index=0,
             destinations=[ft.NavigationBarDestination(icon=icon, selected_icon=selected, label=label) for _, label, icon, selected in TABS],
@@ -117,12 +139,13 @@ class App:
         if page.platform in (ft.PagePlatform.WINDOWS, ft.PagePlatform.LINUX, ft.PagePlatform.MACOS):
             page.window.width, page.window.height = 440, 860  # roughly a phone, handy while developing
         page.on_app_lifecycle_state_change = self._on_lifecycle
+        page.on_view_pop = self._on_view_pop
         page.navigation_bar = self.nav
         page.overlay.append(self.toast_box)
         page.add(ft.SafeArea(expand=True, content=self.body))
 
         self.state.manager.on_busy_change = self._on_busy_change
-        self.show("download")
+        self.show("library")
         page.run_task(self._ticker)
         page.run_task(self._startup)
 
@@ -149,7 +172,7 @@ class App:
             log.exception("startup failed")
 
     async def _prepare_download_dir(self) -> None:
-        """Make sure there is a folder we can write to; fall back to app storage when the public one is blocked."""
+        """Make sure there is a folder we can write to; fall back to app storage when the chosen one is blocked."""
         st = self.state
         target = st.cfg.downloads_path(st.paths)
         status = writable_dir(target)
@@ -157,6 +180,9 @@ class App:
             st.manager.downloads_dir_override = None
             return
         log.warning("download folder %s: %s", target, status)
+        if st.cfg.downloads_dir and not await self.native.has_all_files_access():
+            self.toast("TG Downloader needs All files access to save into the folder you picked.", action="Allow",
+                       on_action=lambda e: self.page.run_task(self.request_all_files_access), error=True)
         candidates: list[str] = []
         try:
             external = await self.storage.get_external_storage_directory()
@@ -172,35 +198,128 @@ class App:
                 return
         self.toast(f"No writable download folder found. {status}", error=True)
 
-    # ======================================================================= navigation
+    # ======================================================================= tabs
     def _on_nav(self, e: ft.Event) -> None:
         self.show(TAB_KEYS[int(self.nav.selected_index or 0)])
 
     def show(self, key: str) -> None:
+        """Switch the bottom tab. Pages pushed on top are closed first."""
+        if key == "download":
+            key = "browse"
+            self.browse.select("links")
+        elif key == "queue":
+            self.open_queue()
+            return
+        elif key == "settings":
+            self.open_settings()
+            return
+        self._close_pages()
         view = self.views[key]
-        self.current = key
+        self.tab = self.current = key
         self.body.content = view.root
+        self.page.appbar = view.appbar
         index = TAB_KEYS.index(key)
         if self.nav.selected_index != index:
             self.nav.selected_index = index
         self.page.update()
         view.on_show()
 
-    def show_panel(self, title: str, root: ft.Control, back_to: str = "settings") -> None:
-        header = ft.Row(
-            [ft.IconButton(ft.Icons.ARROW_BACK, tooltip="Back", on_click=lambda e: self.show(back_to)),
-             ft.Text(title, size=22, weight=ft.FontWeight.BOLD)],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    def set_badge(self, key: str, count: int) -> None:
+        destination = self.nav.destinations[TAB_KEYS.index(key)]
+        badge = str(count) if count else None
+        if destination.badge != badge:
+            destination.badge = badge
+            safe_update(self.nav)
+
+    # ======================================================================= pages on top
+    def push(self, title: str | ft.Control, root: ft.Control, *, owner: Any = None,
+             actions: list[ft.Control] | None = None, fab: ft.FloatingActionButton | None = None) -> ft.View:
+        """Open a full-screen page above the tabs. Android's back gesture and the arrow in its bar close it."""
+        bar = ft.AppBar(title=ft.Text(title) if isinstance(title, str) else title, actions=actions or [])
+        view = ft.View(
+            route=f"/page{len(self._stack) + 1}",
+            padding=0,
+            appbar=bar,
+            floating_action_button=fab,
+            controls=[ft.SafeArea(expand=True, content=ft.Container(root, expand=True, padding=ft.Padding.only(left=16, right=16)))],
         )
+        self._stack.append((view, owner))
+        self.page.views.append(view)
         self.current = "panel"
-        self.body.content = ft.Column([header, root], expand=True, spacing=4)
+        self.page.update()
+        return view
+
+    def back(self) -> None:
+        if self._stack:
+            self._pop(self._stack[-1][0])
+
+    def _on_view_pop(self, e: ft.ViewPopEvent) -> None:
+        view = e.view or (self._stack[-1][0] if self._stack else None)
+        if view is not None:
+            self._pop(view)
+
+    def _pop(self, view: ft.View) -> None:
+        for n, (v, owner) in enumerate(self._stack):
+            if v is view:
+                del self._stack[n]
+                if hasattr(owner, "on_close"):
+                    try:
+                        owner.on_close()
+                    except Exception:  # noqa: BLE001
+                        log.exception("closing a page failed")
+                break
+        try:
+            self.page.views.remove(view)
+        except ValueError:
+            pass
+        if not self._stack:
+            self.current = self.tab
+            self.views[self.tab].on_show()
         self.page.update()
 
+    def _close_pages(self) -> None:
+        while self._stack:
+            view, owner = self._stack.pop()
+            try:
+                self.page.views.remove(view)
+            except ValueError:
+                pass
+            if hasattr(owner, "on_close"):
+                owner.on_close()
+
+    def top_owner(self) -> Any:
+        return self._stack[-1][1] if self._stack else None
+
+    def open_queue(self) -> None:
+        if isinstance(self.top_owner(), QueueView):
+            return
+        self.push("Download queue", self.queue.root, owner=self.queue, actions=self.queue.actions)
+        self.queue.on_show()
+
+    def open_settings(self) -> None:
+        self.push("Settings", self.settings.root, owner=self.settings)
+        self.settings.on_show()
+
     def open_rules(self) -> None:
-        self.show_panel("Link rules", RulesView(self).root)
+        self.push("Link rules", RulesView(self).root)
 
     def open_diagnostics(self) -> None:
-        self.show_panel("Diagnostics", DiagnosticsView(self).root)
+        self.push("Diagnostics", DiagnosticsView(self).root)
+
+    def open_channel(self, chat_id: int, title: str, entity: Any = None, username: str | None = None, category: str = "") -> ChannelView:
+        view = ChannelView(self, chat_id, title, entity=entity, username=username, category=category)
+        view.open()
+        return view
+
+    def open_entity(self, entity: Any) -> ChannelView | None:
+        chat_id = peer_id(entity)
+        if chat_id is None:
+            self.toast("That is not a channel or group", error=True)
+            return None
+        self.state.entities[chat_id] = entity
+        cat = classify(entity)
+        return self.open_channel(chat_id, str(getattr(entity, "title", "") or chat_id), entity=entity,
+                                 username=getattr(entity, "username", None), category=cat.value if cat else "")
 
     # ======================================================================= toasts
     def _build_toast(self) -> None:
@@ -238,7 +357,7 @@ class App:
 
             self.toast_action.on_click = clicked
         self.toast_box.visible = True
-        self._safe_update(self.toast_box)
+        safe_update(self.toast_box)
         self.page.run_task(self._hide_toast_later, seq, 8.0 if (action or error) else 3.5)
 
     async def _hide_toast_later(self, seq: int, seconds: float) -> None:
@@ -248,14 +367,9 @@ class App:
 
     def _hide_toast(self) -> None:
         self.toast_box.visible = False
-        self._safe_update(self.toast_box)
+        safe_update(self.toast_box)
 
-    @staticmethod
-    def _safe_update(control: ft.Control) -> None:
-        try:
-            control.update()
-        except Exception:  # noqa: BLE001 - the control may not be on a page yet
-            pass
+    _safe_update = staticmethod(safe_update)
 
     # ======================================================================= login
     async def ensure_login(self) -> bool:
@@ -273,10 +387,187 @@ class App:
 
     async def on_login_changed(self) -> None:
         self.state.dialogs = None
+        self.state.entities.clear()
         await self.download.refresh_login_banner()
         await self.settings.refresh_account()
-        if self.current == "channels":
-            self.channels.on_show()
+        await self.more.refresh_account()
+        if self.current == "browse":
+            self.browse.on_show()
+
+    # ======================================================================= pictures
+    async def cover_for(self, chat_id: int | None, entity: Any = None) -> bytes | None:
+        """A chat's photo from memory, disk, or Telegram (when the entity is known)."""
+        if chat_id is None:
+            return None
+        if chat_id in self._covers:
+            return self._covers[chat_id]
+        st = self.state
+        entity = entity or st.entities.get(chat_id)
+        if entity is None:
+            from tgdl.telegram.browse import cover_path
+
+            path = cover_path(st.paths.cache_dir, chat_id)
+            try:
+                return path.read_bytes() or None
+            except OSError:
+                return None
+        try:
+            client = await st.session.ensure_connected()
+            data = await chat_cover(client, entity, st.paths.cache_dir)
+        except Exception:  # noqa: BLE001 - offline or logged out: initials are shown instead
+            return None
+        self._covers[chat_id] = data
+        return data
+
+    async def thumb_for(self, message: Any, chat_id: int | None) -> bytes | None:
+        try:
+            client = await self.state.session.ensure_connected()
+            return await message_thumb(client, message, self.state.paths.cache_dir, chat_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def entity_for(self, chat_id: int, peer: Any = None) -> Any:
+        """Find a chat by id (or username). Loads the chat list once when Telethon does not know it yet."""
+        st = self.state
+        if chat_id in st.entities:
+            return st.entities[chat_id]
+        client = await st.session.ensure_connected()
+        for attempt in (peer or chat_id, chat_id):
+            try:
+                entity = await client.get_entity(attempt)
+                st.entities[chat_id] = entity
+                return entity
+            except Exception:  # noqa: BLE001 - not cached yet
+                continue
+        await client.get_dialogs(limit=None)
+        entity = await client.get_entity(chat_id)
+        st.entities[chat_id] = entity
+        return entity
+
+    # ======================================================================= storage: folders and .nomedia
+    async def request_all_files_access(self) -> bool:
+        """Android 11+: open the system switch for All files access. True when it is already on."""
+        if await self.native.has_all_files_access():
+            return True
+        outcome = await self.native.request_all_files_access()
+        if outcome == "failed":
+            self.toast("Open Android Settings > Apps > TG Downloader > Permissions > Files and allow all files", error=True)
+        elif outcome == "asked":
+            self.toast("Turn on 'Allow access to manage all files', then come back")
+        return outcome == "granted"
+
+    async def pick_folder(self, title: str = "Choose a download folder") -> str | None:
+        if self.state.paths.is_android and not await self.native.has_all_files_access():
+            await self.request_all_files_access()
+            return None
+        try:
+            path = await self.file_picker.get_directory_path(dialog_title=title)
+        except Exception as exc:  # noqa: BLE001
+            self.toast(f"Cannot open the folder picker: {exc}", error=True)
+            return None
+        if not path:
+            return None
+        if path.startswith("content://") or path.startswith("/tree/"):
+            self.toast("That location cannot be used as a normal folder. Pick a folder on the phone or SD card.", error=True)
+            return None
+        status = writable_dir(path)
+        if status != "ok":
+            self.toast(f"Cannot save there: {status}", error=True)
+            return None
+        return path
+
+    async def set_download_root_hidden(self, hidden: bool) -> None:
+        """The global switch: .nomedia in the main download folder hides it and every channel folder inside."""
+        st = self.state
+        root = st.manager.downloads_dir
+        st.cfg.nomedia = hidden
+        st.save_config()
+        try:
+            set_nomedia(root, hidden)
+        except OSError as exc:
+            self.toast(f"Cannot change {root}: {exc}", error=True)
+            return
+        await self.refresh_gallery(root)
+        self.toast("Downloads are hidden from the gallery" if hidden else "Downloads show in the gallery again")
+
+    async def set_chat_hidden(self, chat_id: int, title: str, hidden: bool) -> None:
+        """Per chat: .nomedia in that chat's folder. The chat joins the library so the choice is remembered."""
+        st = self.state
+        entry = st.library.get(chat_id) or self.library.add_chat(chat_id, title, st.entities.get(chat_id))
+        entry.nomedia = hidden
+        st.save_library()
+        folder = st.folder_for(chat_id, title)
+        try:
+            set_nomedia(folder, hidden)
+        except OSError as exc:
+            self.toast(f"Cannot change {folder}: {exc}", error=True)
+            return
+        await self.refresh_gallery(folder)
+        if not hidden and hidden_by(folder, None):
+            self.toast("This folder is still hidden: the main download folder hides everything (More > Hide downloads).")
+        else:
+            self.toast(f"{title}: " + ("hidden from the gallery" if hidden else "shown in the gallery"))
+        self.library.render()
+        owner = self.top_owner()
+        if isinstance(owner, ChannelView) and owner.chat_id == chat_id:
+            owner.refresh_header()
+
+    async def channel_folder_dialog(self, chat_id: int, title: str) -> None:
+        """Let the user give one chat its own folder, or go back to the default."""
+        st = self.state
+        page = self.page
+        entry = st.library.get(chat_id)
+        current = st.folder_for(chat_id, title)
+
+        async def choose(e: ft.Event) -> None:
+            page.pop_dialog()
+            picked = await self.pick_folder(f"Folder for {title}")
+            if not picked:
+                return
+            chosen = st.library.get(chat_id) or self.library.add_chat(chat_id, title, st.entities.get(chat_id))
+            chosen.folder = picked
+            st.save_library()
+            if chosen.nomedia:
+                set_nomedia(picked, True)
+            self.toast(f"{title} now saves to {picked}")
+            self._after_folder_change(chat_id)
+
+        def reset(e: ft.Event) -> None:
+            page.pop_dialog()
+            if entry is not None:
+                entry.folder = None
+                st.save_library()
+            self.toast(f"{title} saves to {st.folder_for(chat_id, title)}")
+            self._after_folder_change(chat_id)
+
+        actions: list[ft.Control] = [ft.TextButton("Close", on_click=lambda e: page.pop_dialog())]
+        if entry is not None and entry.folder:
+            actions.insert(0, ft.TextButton("Use default", on_click=reset))
+        actions.append(ft.Button("Choose folder", icon=ft.Icons.FOLDER_OPEN, on_click=choose))
+        page.show_dialog(ft.AlertDialog(
+            title=ft.Text("Download folder"),
+            content=ft.Column(tight=True, spacing=8, controls=[
+                ft.Text(current, selectable=True, size=13),
+                ft.Text("New downloads from this chat go here. Files that are already saved are not moved.", size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT),
+            ]),
+            actions=actions,
+        ))
+
+    def _after_folder_change(self, chat_id: int) -> None:
+        self.library.render()
+        owner = self.top_owner()
+        if isinstance(owner, ChannelView) and owner.chat_id == chat_id:
+            owner.refresh_header()
+
+    async def refresh_gallery(self, folder: str) -> None:
+        """Ask Android to look at a folder again so galleries hide or show it after .nomedia changed."""
+        paths = media_files(folder)
+        marker = os.path.join(folder, NOMEDIA)
+        if os.path.exists(marker):
+            paths.insert(0, marker)
+        if paths:
+            await self.native.scan_files(paths)
 
     # ======================================================================= incoming links
     def on_shared(self, text: str) -> None:
@@ -328,8 +619,19 @@ class App:
                    on_action=lambda e: self.page.run_task(self.handle_incoming, text, True))
 
     def scan_peer(self, peer: Any) -> None:
-        self.show("channels")
-        self.page.run_task(self.channels.scan_peer, peer)
+        """Open a whole channel (from a link or a typed id/username)."""
+        self.page.run_task(self._open_peer, peer)
+
+    async def _open_peer(self, peer: Any) -> None:
+        try:
+            if not await self.ensure_login():
+                return
+            client = await self.state.session.ensure_connected()
+            entity = await client.get_entity(peer)
+        except Exception as exc:  # noqa: BLE001
+            self.toast(f"Cannot open {peer}: {exc}", error=True)
+            return
+        self.open_entity(entity)
 
     async def share_file(self, path: str) -> None:
         try:
@@ -349,6 +651,8 @@ class App:
             self._native_failures = 0
             for text in await self.native.take_pending():
                 await self.handle_incoming(text, autostart=self.state.cfg.android.autostart_shared)
+            if isinstance(self.top_owner(), SettingsView):
+                self.settings.on_show()  # the user may be back from the All files access screen
             await self._offer_clipboard()
         except Exception:  # noqa: BLE001
             log.exception("resume handling failed")
@@ -378,6 +682,9 @@ class App:
             log.exception("could not apply busy state %s", busy)
 
     def _announce_finished(self) -> None:
+        if self.state.manager.paused:
+            self.toast("Downloads paused", action="Queue", on_action=lambda e: self.open_queue())
+            return
         summary = self.state.manager.summary(self._batch_items())
         if not summary.total:
             return
@@ -389,8 +696,8 @@ class App:
         if summary.cancelled:
             parts.append(f"{summary.cancelled} cancelled")
         self.toast("Downloads finished: " + ", ".join(parts or ["nothing new"]),
-                   action="Queue" if self.current != "queue" else None,
-                   on_action=lambda e: self.show("queue"), error=bool(summary.failed and not summary.succeeded))
+                   action="Queue" if not isinstance(self.top_owner(), QueueView) else None,
+                   on_action=lambda e: self.open_queue(), error=bool(summary.failed and not summary.succeeded))
 
     def _batch_items(self) -> list[DownloadItem]:
         by_id = {i.id: i for i in self.state.manager.items}
@@ -408,15 +715,33 @@ class App:
             done += size if item.state in (ItemState.DONE, ItemState.SKIPPED) else min(item.done, size)
         return done, total
 
+    def _record_finished(self, finished: list[DownloadItem]) -> None:
+        st = self.state
+        saved = [i for i in finished if i.state in (ItemState.DONE, ItemState.SKIPPED) and i.path]
+        for item in saved:
+            st.history.add_item(item)
+        if saved:
+            self._history_dirty = True
+            fresh = [i.path for i in saved if i.state is ItemState.DONE]
+            # Files under a .nomedia folder are still scanned: Android then files them as hidden instead of showing them.
+            if fresh:
+                self.page.run_task(self._scan_files, fresh)
+
     async def _ticker(self) -> None:
         """Drives the screen while this App is the active one. A newer App (after Android recreated the page) ends it."""
         last_slow = 0.0
         while self.state.active_app is self:
             try:
-                finished = self.queue.tick()
-                paths = [i.path for i in finished if i.state is ItemState.DONE and i.path]
-                if paths:
-                    self.page.run_task(self._scan_files, paths)
+                dirty, structure, finished = self.state.sink.take()
+                self.queue.apply(dirty, structure)
+                if finished:
+                    self._record_finished(finished)
+                if dirty or structure:
+                    owner = self.top_owner()
+                    if isinstance(owner, ChannelView):
+                        owner.on_downloads_changed()
+                    elif self.current == "updates":
+                        self.updates.on_downloads_changed()
                 now = time.monotonic()
                 if now - last_slow >= KEEP_ALIVE_EVERY:
                     last_slow = now
@@ -433,11 +758,15 @@ class App:
         active = [i for i in items if i.state is ItemState.DOWNLOADING]
         waiting = sum(1 for i in items if i.state is ItemState.QUEUED)
 
-        label = f"Queue ({len(active) + waiting})" if (active or waiting) else "Queue"
-        destination = self.nav.destinations[TAB_KEYS.index("queue")]
-        if destination.label != label:
-            destination.label = label
-            self._safe_update(self.nav)
+        self.set_badge("more", len(active) + waiting)
+        self.set_badge("updates", sum(e.unread for e in self.state.library.entries()))
+        if self.current == "more":
+            self.more.refresh_queue_line()
+        if self._history_dirty:
+            self._history_dirty = False
+            self.state.save_history()
+            if self.current == "history":
+                self.history.on_show()
 
         if manager.busy and self.state.cfg.android.keep_alive and self.native.available and self._native_failures < 3:
             done, total = self._batch_progress()
@@ -453,11 +782,7 @@ class App:
                 self._native_failures += 1
 
     async def _scan_files(self, paths: list[str]) -> None:
-        for path in paths[:50]:
-            try:
-                await self.native.scan_file(path)
-            except Exception:  # noqa: BLE001
-                log.debug("media scan failed for %s", path, exc_info=True)
+        await self.native.scan_files(paths[:200])
 
 
 async def main(page: ft.Page) -> None:

@@ -46,6 +46,17 @@ class TgdlNative(ft.Service):
         """Tell Android's media scanner about a new file so galleries show it."""
         await self._invoke_method("scan_file", {"path": path}, timeout=SHORT)
 
+    async def scan_files(self, paths: list[str]) -> int:
+        """Ask the media scanner to look at many files again (after a .nomedia marker changed)."""
+        return int(await self._invoke_method("scan_files", {"paths": list(paths)}, timeout=SHORT) or 0)
+
+    async def has_all_files_access(self) -> bool:
+        return bool(await self._invoke_method("has_all_files_access", timeout=SHORT))
+
+    async def request_all_files_access(self) -> str:
+        """`granted`, `asked` (Android's settings screen was opened) or `failed`."""
+        return str(await self._invoke_method("request_all_files_access", timeout=USER_ACTION) or "failed")
+
     async def sdk_int(self) -> int:
         return int(await self._invoke_method("sdk_int", timeout=SHORT) or 0)
 

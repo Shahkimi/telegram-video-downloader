@@ -102,6 +102,16 @@ class TgdlNativePlugin :
                     if (path != null) MediaScannerConnection.scanFile(context, arrayOf(path), null, null)
                     result.success(null)
                 }
+                // Re-index many files at once, e.g. after a .nomedia marker was added or removed. The scanner then hides
+                // or shows them in galleries. Nothing is deleted.
+                "scan_files" -> {
+                    val paths = call.argument<List<String>>("paths") ?: emptyList()
+                    if (paths.isNotEmpty()) MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
+                    result.success(paths.size)
+                }
+
+                "has_all_files_access" -> result.success(hasAllFilesAccess())
+                "request_all_files_access" -> result.success(requestAllFilesAccess())
 
                 "sdk_int" -> result.success(Build.VERSION.SDK_INT)
 
@@ -140,6 +150,30 @@ class TgdlNativePlugin :
         pendingPermission?.success(granted)
         pendingPermission = null
         return true
+    }
+
+    /** Android 11+: "All files access" (needed to save outside Download/). Older: the classic storage permission. */
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+        else Build.VERSION.SDK_INT < 23 ||
+            context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    /** "granted" when already allowed, "asked" when the settings screen was opened, "failed" otherwise. */
+    private fun requestAllFilesAccess(): String {
+        if (hasAllFilesAccess()) return "granted"
+        if (Build.VERSION.SDK_INT < 30) return "failed"  // below 11 the runtime permission is asked with request_permission
+        val starter: Context = activity ?: context
+        val direct = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${context.packageName}"))
+        val list = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        for (intent in listOf(direct, list)) {
+            try {
+                if (starter !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                starter.startActivity(intent)
+                return "asked"
+            } catch (_: Exception) {
+            }
+        }
+        return "failed"
     }
 
     /** "granted" when already exempt, "asked" when the system dialog was opened, "failed" otherwise. */
