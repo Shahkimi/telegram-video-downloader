@@ -7,7 +7,7 @@ from typing import Callable
 import flet as ft
 
 from tgdl.engine.models import DownloadItem, ItemState
-from tgdl.storage import is_video
+from tgdl.storage import SpaceCheck, is_video
 from tgdl.util import format_eta, format_size, format_speed
 
 MUTED = ft.Colors.ON_SURFACE_VARIANT
@@ -131,6 +131,22 @@ def describe_item(item: DownloadItem) -> str:
     if s is ItemState.CANCELLED:
         return "Cancelled"
     return item.error or "Failed"
+
+
+def space_summary(check: SpaceCheck) -> tuple[str, bool]:
+    """One line about the storage a download needs. The flag is True when it does not fit."""
+    need = format_size(check.needed)
+    queued = f" (+{format_size(check.queued)} already in the queue)" if check.queued else ""
+    if check.free is None:
+        return f"Needs {need}{queued}", False
+    if check.fits:
+        return f"Needs {need}{queued}  -  {format_size(check.free)} free, {format_size(check.free_after)} left after", False
+    return f"Not enough space: needs {need}{queued}, only {format_size(check.free)} free", True
+
+
+def space_text(check: SpaceCheck, size: int = 12) -> ft.Text:
+    text, short = space_summary(check)
+    return ft.Text(text, size=size, color=ft.Colors.ERROR if short else MUTED)
 
 
 MENU_LABELS = {

@@ -76,6 +76,10 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
   `Dev/localstorage`. Plain *Download* still saves straight into the chat's folder (`Dev`). Finished rows show the folder
   name, the queue shows `Dev / auth`, and the folder names are remembered per Library chat and included in the backup.
   A chat hidden with `.nomedia` hides its custom folders too. *Get all* saves into the main folder.
+- **Storage check**: while selecting, the page shows the total size of what will be downloaded (files already on the
+  phone or in the queue are not counted), the free space, and what is left after. What the queue still has to write is
+  counted too, and 200 MB is kept free for Android. If it does not fit, the line turns red and *Download* asks before
+  queueing. The folder sheet and the *Get all* dialog show the same line.
 - *Get all* (or the download menu) scans the whole chat and queues everything that is not downloaded or queued yet.
 
 ### Download queue

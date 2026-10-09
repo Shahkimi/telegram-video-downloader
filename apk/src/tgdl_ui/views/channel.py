@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import flet as ft
 
 from tgdl.engine.models import DownloadItem, ItemState
-from tgdl.storage import hidden_by, subfolder_name, subfolder_of
+from tgdl.storage import SpaceCheck, hidden_by, subfolder_name, subfolder_of
 from tgdl.stream import StreamSource
 from tgdl.telegram.browse import MediaEntry, fetch_media
 from tgdl.telegram.dialogs import ChatCategory
@@ -20,7 +20,7 @@ from tgdl.telegram.resolve import MediaFilter, ResolvedMsg, scan_channel
 from tgdl.telegram.session import LoginError
 from tgdl.util import format_eta, format_size, format_speed
 
-from ..widgets import cover, empty_state, muted, safe_update
+from ..widgets import cover, empty_state, muted, safe_update, space_summary, space_text
 from . import player
 from .folder_picker import open_folder_picker
 
@@ -178,6 +178,8 @@ class ChannelView:
         self.all_btn = self._action_button(ft.Icons.DOWNLOAD_FOR_OFFLINE, "Get all", lambda e: app.page.run_task(self.download_whole_channel))
         self.filter_chips = ft.Row(spacing=6, scroll=ft.ScrollMode.AUTO)
         self.count_text = ft.Text("", size=13, weight=ft.FontWeight.W_600)
+        self.space_text = muted("", size=12, visible=False)   # while selecting: storage needed vs free
+        self._blocked = False                                  # the last download() waits for the low-space answer
         self.banner = ft.Container(visible=False)
         self.to_folder_btn = ft.TextButton("To folder...", icon=ft.Icons.CREATE_NEW_FOLDER, visible=False,
                                            on_click=lambda e: self.download_selected_to_folder())
@@ -197,6 +199,7 @@ class ChannelView:
                                                                                   on_click=lambda e: self.start_selecting())],
                                             spacing=0)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            self.space_text,
             self.spinner,
         ])
         self.footer = ft.Column([self.more_btn, ft.Container(height=88)], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
@@ -445,6 +448,7 @@ class ChannelView:
             safe_update(row.control)
         self._update_counts()
         safe_update(self.count_text)
+        safe_update(self.space_text)
 
     def _update_counts(self) -> None:
         done = sum(1 for r in self.rows.values() if r.status == "done")
@@ -452,6 +456,26 @@ class ChannelView:
         if self.selecting:
             text = f"{len(self.selected)} selected of {len(self.entries)}"
         self.count_text.value = text
+        self.space_text.visible = self.selecting and bool(self.selected)
+        if self.space_text.visible:
+            check = self.space_check(self.chosen())
+            self.space_text.value, short = space_summary(check)
+            self.space_text.color = ft.Colors.ERROR if short else ft.Colors.ON_SURFACE_VARIANT
+            if check.needed:
+                self.count_text.value += f"  -  {format_size(check.needed)}"
+
+    def chosen(self) -> list[MediaEntry]:
+        return [e for e in self.entries if e.msg_id in self.selected]
+
+    def _wanted(self, entries: list[MediaEntry]) -> list[MediaEntry]:
+        """The entries that would really be queued: not downloaded, not already in the queue."""
+        items = self._items_by_msg()
+        return [e for e in entries if self.status_of(e, items)[0] in ("none", "failed") and e.message is not None]
+
+    def space_check(self, entries: list[MediaEntry]) -> SpaceCheck:
+        """Storage the entries need (only the ones not downloaded or queued yet) against the free space."""
+        needed = sum(e.size or 0 for e in self._wanted(entries))
+        return self.state.space_for(self.chat_id, self.title, needed)
 
     # ---- row actions --------------------------------------------------------------------------
     def on_row_click(self, entry: MediaEntry) -> None:
@@ -465,26 +489,52 @@ class ChannelView:
             self.start_selecting()
         self.toggle(entry.msg_id)
 
-    def download(self, entries: list[MediaEntry], subfolder: str = "") -> list[DownloadItem]:
-        """Queue entries. `subfolder` is a folder inside this chat's folder; '' saves into the chat's folder itself."""
+    def download(self, entries: list[MediaEntry], subfolder: str = "", force: bool = False) -> list[DownloadItem]:
+        """Queue entries. `subfolder` is a folder inside this chat's folder; '' saves into the chat's folder itself.
+        When the files do not fit in the free space, asks first (force=True skips that) and returns []."""
+        self._blocked = False
         if self.entity is None:
             self.app.toast("Still opening the chat, try again in a moment")
             return []
-        items = self._items_by_msg()
-        wanted = [e for e in entries if self.status_of(e, items)[0] in ("none", "failed") and e.message is not None]
+        wanted = self._wanted(entries)
         if not wanted:
             self.app.toast("Already downloaded or in the queue")
             return []
+        if not force:
+            check = self.space_check(wanted)
+            if not check.fits:
+                self._blocked = True
+                self._confirm_low_space(check, wanted, subfolder)
+                return []
         subfolder = subfolder_name(subfolder)
         added = self.state.manager.enqueue_telegram([ResolvedMsg(e.message, self.entity, self.title) for e in wanted],
                                                     subfolder=subfolder)
         self._own(added)
         if subfolder:
             self.state.remember_subfolder(self.chat_id, subfolder)
-        where = f" to {subfolder}" if subfolder else ""
-        self.app.toast(f"Added {len(added)}{where} to the queue", action="Queue", on_action=lambda ev: self.app.open_queue())
+        where = f" (folder {subfolder})" if subfolder else ""
+        self.app.toast(f"Added {len(added)} to the queue{where}", action="Queue", on_action=lambda ev: self.app.open_queue())
         self.on_downloads_changed()
         return added
+
+    def _confirm_low_space(self, check: SpaceCheck, entries: list[MediaEntry], subfolder: str) -> None:
+        page = self.app.page
+
+        def anyway(e: ft.Event) -> None:
+            page.pop_dialog()
+            self._download_and_leave_selection(entries, subfolder, force=True)
+
+        page.show_dialog(ft.AlertDialog(
+            title=ft.Text("Not enough space"),
+            content=ft.Column(tight=True, spacing=6, controls=[
+                ft.Text(f"{len(entries)} file{'s' if len(entries) != 1 else ''} need {format_size(check.needed)}."),
+                space_text(check),
+                muted(f"Free up {format_size(check.short_by)}, or pick fewer files. Downloads that run out of space fail "
+                      "and can be retried later.", size=12),
+            ]),
+            actions=[ft.TextButton("Cancel", on_click=lambda e: page.pop_dialog()),
+                     ft.Button("Download anyway", on_click=anyway)],
+        ))
 
     def download_to_folder(self, entries: list[MediaEntry]) -> None:
         """Ask which folder inside this chat's folder the entries go to, then queue them."""
@@ -492,11 +542,12 @@ class ChannelView:
             self.app.toast("Select something first")
             return
         open_folder_picker(self.app, self.chat_id, self.title, len(entries),
-                           lambda name: self._download_and_leave_selection(entries, name))
+                           lambda name: self._download_and_leave_selection(entries, name),
+                           space=self.space_check(entries))
 
-    def _download_and_leave_selection(self, entries: list[MediaEntry], subfolder: str) -> None:
-        self.download(entries, subfolder)
-        if self.selecting:
+    def _download_and_leave_selection(self, entries: list[MediaEntry], subfolder: str, force: bool = False) -> None:
+        self.download(entries, subfolder, force=force)
+        if self.selecting and not self._blocked:   # kept while the low-space question is open
             self.stop_selecting()
 
     def subfolder_tag(self, entry: MediaEntry) -> str:
@@ -624,6 +675,7 @@ class ChannelView:
             safe_update(row.control)
         self._update_counts()
         safe_update(self.count_text)
+        safe_update(self.space_text)
         self._apply_bar()
 
     def select_all(self) -> None:
@@ -646,11 +698,10 @@ class ChannelView:
         if not chosen:
             self.app.toast("Select something first")
             return
-        self.download(chosen)
-        self.stop_selecting()
+        self._download_and_leave_selection(chosen, "")
 
     def download_selected_to_folder(self) -> None:
-        self.download_to_folder([e for e in self.entries if e.msg_id in self.selected])
+        self.download_to_folder(self.chosen())
 
     def download_loaded(self) -> None:
         if not self.entries:
@@ -712,6 +763,7 @@ class ChannelView:
             lines.append(muted("Newer files were left out to stay under your size limit (Settings).", size=12))
         if result.cancelled:
             lines.append(muted("The scan was stopped early.", size=12))
+        lines.append(space_text(st.space_for(self.chat_id, self.title, size)))
         lines.append(muted(f"Saving to {st.folder_for(self.chat_id, self.title)}", size=11))
 
         def start(e: ft.Event) -> None:

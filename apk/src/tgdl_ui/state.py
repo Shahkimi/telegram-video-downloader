@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from tgdl import __version__, netfix
@@ -13,7 +14,7 @@ from tgdl.library import History, Library, LibraryEntry
 from tgdl.links.rules import RuleSet
 from tgdl.logs import setup_logging
 from tgdl.paths import AppPaths, resolve_paths
-from tgdl.storage import channel_dir, subfolders
+from tgdl.storage import SpaceCheck, channel_dir, check_space, subfolders
 from tgdl.stream import StreamServer
 from tgdl.telegram.dialogs import DialogInfo
 from tgdl.telegram.session import TelegramSession
@@ -84,12 +85,25 @@ class AppState:
 
     def subfolder_choices(self, chat_id: int | None, title: str) -> list[tuple[str, int]]:
         """Custom folders inside the chat's folder: the ones on disk plus the remembered names, with file counts."""
-        found = dict(subfolders(self.folder_for(chat_id, title)))
+        base = self.folder_for(chat_id, title)
         entry = self.library.get(chat_id)
-        if entry is not None:
-            for name in entry.subfolders:
-                found.setdefault(name, 0)
-        return sorted(found.items(), key=lambda t: t[0].lower())
+        remembered = list(entry.subfolders) if entry is not None else []
+        on_disk = subfolders(base)
+        if os.path.normcase(os.path.abspath(base)) == os.path.normcase(os.path.abspath(self.manager.downloads_dir)):
+            # no folder of its own: the other folders here belong to other chats, only show this chat's names
+            known = {n.lower() for n in remembered}
+            on_disk = [(n, c) for n, c in on_disk if n.lower() in known]
+        found = {n.lower(): (n, c) for n, c in on_disk}   # phone storage ignores case: Auth and auth are one folder
+        for name in remembered:
+            found.setdefault(name.lower(), (name, 0))
+        return sorted(found.values(), key=lambda t: t[0].lower())
+
+    def queued_bytes(self) -> int:
+        """What the queue still has to write: unfinished items, minus what they already saved."""
+        return sum(max(0, i.total - i.done) for i in self.manager.items if not i.state.finished)
+
+    def space_for(self, chat_id: int | None, title: str, needed: int) -> SpaceCheck:
+        return check_space(self.folder_for(chat_id, title), needed, self.queued_bytes())
 
     def remember_subfolder(self, chat_id: int | None, name: str) -> None:
         entry = self.library.get(chat_id)

@@ -141,3 +141,18 @@ def test_subfolder_helpers(tmp_path):
     assert subfolder_of(os.path.join(base, "Auth", "a.mp4"), base) == "Auth"
     assert subfolder_of(os.path.join(base, "main.mp4"), base) == ""
     assert subfolder_of(os.path.join(str(tmp_path), "other", "x.mp4"), base) == ""
+
+
+def test_space_check(tmp_path, monkeypatch):
+    import shutil
+
+    from tgdl.storage import RESERVE, SpaceCheck, check_space, free_space
+
+    assert free_space(str(tmp_path / "not" / "made" / "yet")) == shutil.disk_usage(tmp_path).free
+    ok = SpaceCheck(needed=100, queued=50, free=RESERVE + 150)
+    assert ok.fits and ok.short_by == 0 and ok.free_after == RESERVE
+    short = SpaceCheck(needed=100, queued=50, free=RESERVE + 100)
+    assert not short.fits and short.short_by == 50
+    unknown = SpaceCheck(needed=10**15)
+    assert unknown.fits and unknown.free_after is None       # cannot read the storage: never block
+    assert check_space(str(tmp_path), -5).needed == 0

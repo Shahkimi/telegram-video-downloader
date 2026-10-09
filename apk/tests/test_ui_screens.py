@@ -430,8 +430,10 @@ async def test_download_to_a_custom_folder(app, monkeypatch, tmp_path):
     items = st.manager.items
     assert [(i.msg_id, i.subfolder) for i in items] == [(5, "auth"), (4, "auth")]
     assert st.library.get(-1001).subfolders == ["auth"] and not view.selecting
-    assert "to auth" in toast(app)
+    assert toast(app) == "Added 2 to the queue (folder auth)"
     assert [n for n, _ in st.subfolder_choices(-1001, "Dev")] == ["auth", "session"]
+    (tmp_path / "dl" / "Dev" / "Auth").mkdir()     # phone storage ignores case: still one entry
+    assert [n for n, _ in st.subfolder_choices(-1001, "Dev")] in (["auth", "session"], ["Auth", "session"])
 
     # picking the main folder keeps the old behaviour
     view.download_to_folder([view.rows[3].entry])
@@ -448,10 +450,75 @@ async def test_download_to_a_custom_folder(app, monkeypatch, tmp_path):
     assert len(items) == 3
 
     # queue rows and finished rows show where the file went
-    assert "Dev / auth" in app.queue.tiles[items[0].id].detail.value if items[0].id in app.queue.tiles else True
+    app.open_queue()
+    assert app.queue.tiles[items[0].id].detail.value.startswith("Dev / auth  -  ")
+    assert app.queue.tiles[items[2].id].detail.value.startswith("Dev  -  ")
     path = tmp_path / "dl" / "Dev" / "auth" / "clip 5.mp4"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"1")
     st.history.add(HistoryRecord(path=str(path), filename="clip 5.mp4", chat_id=-1001, msg_id=5))
     assert view.subfolder_tag(view.rows[5].entry) == "auth"
     assert view.subfolder_tag(view.rows[3].entry) == ""
+
+
+def test_picker_without_a_chat_folder_hides_other_chats(app, tmp_path):
+    st = app.state
+    st.cfg.per_channel_folders = False                  # everything lands in the download root
+    root = tmp_path / "dl"
+    for name in ("Movies", "News", "auth"):
+        (root / name).mkdir(parents=True)
+    assert st.subfolder_choices(-5, "Dev") == []        # Movies and News belong to other chats
+    st.library.add(LibraryEntry(chat_id=-5, title="Dev", subfolders=["auth", "session"]))
+    assert st.subfolder_choices(-5, "Dev") == [("auth", 0), ("session", 0)]
+
+
+async def test_selection_shows_storage_needed_and_asks_when_it_does_not_fit(app, monkeypatch, tmp_path):
+    import tgdl.storage as storage_mod
+    from tgdl.storage import RESERVE
+
+    entity = chan(-1001, "Dev")
+    msgs = [FakeMessage(id=i, text=f"clip {i}", size=1000 * i) for i in (5, 4, 3)]
+
+    async def fake_fetch(client, ent, f, offset_id=0, min_id=0, limit=40):
+        return MediaPage([entry_for(m) for m in msgs], 0, 5)
+
+    async def connected():
+        return "client"
+
+    monkeypatch.setattr(channel_mod, "fetch_media", fake_fetch)
+    monkeypatch.setattr(app.state.session, "ensure_connected", connected)
+    free = {"bytes": RESERVE + 100_000}
+    monkeypatch.setattr(storage_mod, "free_space", lambda path: free["bytes"])
+
+    st = app.state
+    view = app.open_channel(-1001, "Dev", entity=entity)
+    await view.reload()
+    view.on_row_long_press(view.rows[5].entry)
+    view.toggle(4)
+    assert view.count_text.value == "2 selected of 3  -  8.8 KB"
+    assert view.space_text.visible and view.space_text.value.startswith("Needs ")
+    assert view.space_text.color != ft.Colors.ERROR
+
+    # the queue's unfinished bytes count too, and finished ones do not
+    st.manager.items.append(DownloadItem(id="q", kind="telegram", title="big", state=ItemState.QUEUED, total=95_000, done=1_000))
+    st.manager.items.append(DownloadItem(id="d", kind="telegram", title="old", state=ItemState.DONE, total=10**9))
+    check = view.space_check(view.chosen())
+    assert (check.needed, check.queued) == (9000, 94_000) and not check.fits and check.short_by == 3000
+    view._update_counts()
+    assert view.space_text.color == ft.Colors.ERROR and "Not enough space" in view.space_text.value
+
+    # downloading asks first; Cancel keeps the selection, "Download anyway" queues and ends it
+    view.download_selected()
+    dialog = app.page.show_dialog.call_args[0][0]
+    assert dialog.title.value == "Not enough space" and view.selecting
+    assert not any(i.msg_id in (5, 4) for i in st.manager.items)
+    app.page.pop_dialog = MagicMock()
+    dialog.actions[1].on_click(None)
+    assert {i.msg_id for i in st.manager.items if i.msg_id} == {5, 4} and not view.selecting
+
+    # enough room: no question, and the folder picker shows the size
+    free["bytes"] = 10**12
+    view.download_to_folder([view.rows[3].entry])
+    sheet = app.page.show_dialog.call_args[0][0]
+    texts = [c.value for c in sheet.content.content.controls if isinstance(c, ft.Text)]
+    assert texts[0] == "Download 1 item (2.9 KB) to..." and texts[1].startswith("Needs 2.9 KB")

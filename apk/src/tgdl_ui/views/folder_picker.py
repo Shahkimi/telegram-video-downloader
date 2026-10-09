@@ -5,20 +5,25 @@ from typing import TYPE_CHECKING, Callable
 
 import flet as ft
 
-from tgdl.storage import subfolder_name
+from tgdl.storage import SpaceCheck, subfolder_name
+from tgdl.util import format_size
 
-from ..widgets import muted, safe_update
+from ..widgets import muted, safe_update, space_text
 
 if TYPE_CHECKING:
     from ..app import App
 
 
-def open_folder_picker(app: "App", chat_id: int, chat_title: str, count: int, on_pick: Callable[[str], None]) -> ft.BottomSheet:
-    """Calls on_pick('') for the chat's own folder or on_pick(name) for a subfolder (new names are created on download)."""
+def open_folder_picker(app: "App", chat_id: int, chat_title: str, count: int, on_pick: Callable[[str], None],
+                       space: SpaceCheck | None = None) -> ft.BottomSheet:
+    """Calls on_pick('') for the chat's own folder or on_pick(name) for a subfolder (new names are created on download).
+    `space` adds a line with the storage the download needs."""
     page = app.page
     st = app.state
     base = st.folder_for(chat_id, chat_title)
     what = f"{count} item{'s' if count != 1 else ''}"
+    if space is not None and space.needed:
+        what += f" ({format_size(space.needed)})"
 
     def pick(name: str) -> Callable[[ft.Event], None]:
         def handler(e: ft.Event) -> None:
@@ -31,6 +36,8 @@ def open_folder_picker(app: "App", chat_id: int, chat_title: str, count: int, on
         ft.ListTile(leading=ft.Icon(ft.Icons.FOLDER_SPECIAL), title=ft.Text(f"{chat_title} (main folder)"),
                     subtitle=muted(base, size=11, max_lines=1), on_click=pick("")),
     ]
+    if space is not None:
+        rows.insert(1, space_text(space))
     for name, files in st.subfolder_choices(chat_id, chat_title):
         rows.append(ft.ListTile(leading=ft.Icon(ft.Icons.FOLDER), title=ft.Text(name),
                                 subtitle=muted(f"{files} file{'s' if files != 1 else ''}", size=11), on_click=pick(name)))

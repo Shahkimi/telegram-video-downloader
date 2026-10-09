@@ -1,8 +1,11 @@
-"""Download folders: one folder per channel, and the .nomedia marker that hides a folder from gallery apps."""
+"""Download folders: one folder per channel, custom folders inside it, the .nomedia marker that hides a folder from
+gallery apps, and the free-space check done before queueing."""
 from __future__ import annotations
 
 import mimetypes
 import os
+import shutil
+from dataclasses import dataclass
 
 from .util import clean_filename
 
@@ -71,6 +74,47 @@ def subfolder_of(path: str, base: str) -> str:
     if os.path.normcase(os.path.dirname(parent)) == os.path.normcase(root):
         return os.path.basename(parent)
     return ""
+
+
+RESERVE = 200 * 1024 * 1024   # leave this much free so Android itself does not run out
+
+
+def free_space(path: str) -> int | None:
+    """Free bytes on the storage holding path (the folder may not exist yet). None when it cannot be read."""
+    probe = os.path.abspath(path or ".")
+    while not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    try:
+        return shutil.disk_usage(probe).free
+    except OSError:
+        return None
+
+
+@dataclass
+class SpaceCheck:
+    """Whether `needed` more bytes fit, after what the queue still has to write (`queued`)."""
+    needed: int
+    queued: int = 0
+    free: int | None = None
+
+    @property
+    def fits(self) -> bool:
+        return self.free is None or self.needed + self.queued + RESERVE <= self.free
+
+    @property
+    def short_by(self) -> int:
+        return 0 if self.fits else self.needed + self.queued + RESERVE - (self.free or 0)
+
+    @property
+    def free_after(self) -> int | None:
+        return None if self.free is None else self.free - self.queued - self.needed
+
+
+def check_space(folder: str, needed: int, queued: int = 0) -> SpaceCheck:
+    return SpaceCheck(max(0, needed), max(0, queued), free_space(folder))
 
 
 def has_nomedia(folder: str) -> bool:
