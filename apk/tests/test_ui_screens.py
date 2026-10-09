@@ -225,3 +225,51 @@ def test_finished_downloads_go_to_history(app, tmp_path):
     app._record_finished([done, failed])
     assert app.state.history.downloaded(-7, 3)
     assert len(app.state.history.records) == 1 and app._history_dirty
+
+
+async def test_watch_streams_or_plays_the_saved_file(app, tmp_path):
+    import flet_video as fv
+
+    scheduled = []
+    app.page.run_task = lambda fn, *a: scheduled.append((fn, a))
+    view = ChannelView(app, -1001, "Movies", entity=chan())
+    msg = FakeMessage(id=8, text="trailer", size=5000)
+    msg.file.mime_type = "video/x-matroska"
+    entry = entry_for(msg)
+    try:
+        # not downloaded yet: streamed from Telegram through a private local link
+        view.watch(entry)
+        page = scheduled[-1][0].__self__
+        assert page.source.size == 5000 and page.source.mime == "video/x-matroska" and page.on_download
+        await page.open()
+        assert page.url.startswith("http://127.0.0.1:") and page.url.endswith(".mp4")
+        root = app.page.views[-1].controls[0].content.content
+        video = root.controls[0].content
+        assert isinstance(video, fv.Video) and video.playlist[0].resource == page.url and video.autoplay
+        assert len(app.state.streams.sources) == 1
+        page._download(None)
+        assert app.state.manager.items[-1].msg_id == 8  # Download from the player queues it
+        app.back()
+        assert not app.state.streams.sources  # the link dies with the page
+
+        # downloaded: plays the file, nothing is streamed
+        saved = tmp_path / "trailer.mp4"
+        saved.write_bytes(b"1")
+        app.state.history.add(HistoryRecord(path=str(saved), filename="trailer.mp4", chat_id=-1001, msg_id=8))
+        view.watch(entry)
+        page = scheduled[-1][0].__self__
+        await page.open()
+        assert page.url == str(saved) and not app.state.streams.sources
+        app.back()
+    finally:
+        await app.state.streams.close()
+
+
+def test_history_offers_play_for_videos(app, tmp_path):
+    saved = tmp_path / "clip.mp4"
+    saved.write_bytes(b"1")
+    app.state.history.add(HistoryRecord(path=str(saved), filename="clip.mp4"))
+    app.show("history")
+    row = app.history.list.controls[-1]
+    menu = row.content.controls[-1]
+    assert [i.content for i in menu.items][:2] == ["Play", "Share"]

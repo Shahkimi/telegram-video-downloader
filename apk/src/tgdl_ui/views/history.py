@@ -13,6 +13,7 @@ from tgdl.telegram.browse import thumb_path
 from tgdl.util import format_size
 
 from ..widgets import empty_state, muted, safe_update
+from . import player
 from .channel import relative_day
 
 if TYPE_CHECKING:
@@ -98,6 +99,9 @@ class HistoryView:
         when = datetime.fromtimestamp(record.finished_at).strftime("%H:%M")
         meta = "  -  ".join(p for p in (record.chat_title or (record.url or ""), format_size(record.size) if record.size else "", when) if p)
         items = []
+        is_video = os.path.splitext(record.filename)[1].lower() in VIDEO_EXT
+        if exists and is_video and player.available():
+            items.append(ft.PopupMenuItem(content="Play", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self.play(record)))
         if exists:
             items.append(ft.PopupMenuItem(content="Share", icon=ft.Icons.SHARE,
                                           on_click=lambda e: self.app.page.run_task(self.app.share_file, record.path)))
@@ -121,6 +125,9 @@ class HistoryView:
         )
 
     # ---- actions ------------------------------------------------------------------------------
+    def play(self, record: HistoryRecord) -> None:
+        self.app.page.run_task(player.PlayerPage(self.app, record.filename, path=record.path).open)
+
     def confirm_delete(self, record: HistoryRecord) -> None:
         page = self.app.page
 

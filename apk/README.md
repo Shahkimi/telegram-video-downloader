@@ -8,6 +8,7 @@ and shares the same download engine.
   History, Browse and More along the bottom, and a page per channel that lists its videos like chapters.
 - **Telegram**: log in with your own API ID, paste or share links, pick single videos from a channel, or download all of it.
 - **Download manager**: pause, resume, reorder, cancel and retry; choose where files are saved, globally or per channel.
+- **Watch first**: stream a video from Telegram inside the app before deciding to download it.
 - **Hide from the gallery**: one switch puts a `.nomedia` file in the download folder (or in one channel's folder) so
   Gallery and Photos leave those videos alone.
 - **Add your own link formats**: teach the app about links it does not know yet (see [Link rules](#link-rules)).
@@ -52,7 +53,7 @@ it is not copied to Google Drive. *Settings > Log out* removes it.
 |---|---|
 | **Library** | The chats you follow, as a grid of covers. The left badge counts downloaded files, the right one new posts. Long-press a cover for its folder, *Hide from gallery*, *Mark as seen* or *Remove*. The toolbar searches, sorts, switches grid/list and checks for new posts. |
 | **Updates** | New media in Library chats since you last opened them, grouped by day. Tap the arrow to download one, or the download button at the top for all of them. Checked when you open the tab (at most every 15 minutes) or with the refresh button. |
-| **History** | Every finished download, newest first. Share it, open its chat, delete the file, or forget missing files. |
+| **History** | Every finished download, newest first. Play it, share it, open its chat, delete the file, or forget missing files. |
 | **Browse** | *Chats*: all your channels and groups with search and category chips; the heart adds one to the Library, a tap opens it. *Links*: paste links (see below). |
 | **More** | The *Hide downloads from gallery* switch, the **Download queue**, Settings, Link rules, Diagnostics and About. |
 
@@ -64,6 +65,10 @@ its media newest first, 40 at a time (*Load older* fetches more). Choose *Videos
 - The button on each row shows its state: download arrow, waiting clock, a progress ring while downloading (tap to pause),
   a pause icon (tap to resume), a green check when it is on the phone, or a red error (tap to retry).
 - Tap a row for details (caption, size, where it was saved) with Download, Share and Delete.
+- **Watch before downloading**: tap a video's picture (it has a play icon) or *Watch* in its details. The video streams
+  straight from Telegram and nothing is saved; *Download* on the player queues it if you want to keep it. Videos that are
+  already downloaded play from the phone instead. Seeking works, though a jump may take a moment while Telegram sends
+  that part.
 - Long-press a row to select several, then use the floating *Download* button. The toolbar has *Select all* and *Invert*.
 - *Get all* (or the download menu) scans the whole chat and queues everything that is not downloaded or queued yet.
 

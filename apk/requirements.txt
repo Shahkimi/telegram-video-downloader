@@ -1,4 +1,5 @@
 flet==1.0.3
+flet-video==1.0.3
 telethon>=1.45,<2
 yt-dlp>=2026.8.19
 certifi

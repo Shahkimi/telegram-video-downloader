@@ -14,6 +14,7 @@ from tgdl.links.rules import RuleSet
 from tgdl.logs import setup_logging
 from tgdl.paths import AppPaths, resolve_paths
 from tgdl.storage import channel_dir
+from tgdl.stream import StreamServer
 from tgdl.telegram.dialogs import DialogInfo
 from tgdl.telegram.session import TelegramSession
 
@@ -38,6 +39,7 @@ class AppState:
         self.manager.placer = self.place
         self.library = Library.load(self.paths.data_dir / "library.json")
         self.history = History.load(self.paths.data_dir / "history.json")
+        self.streams = StreamServer(self.session.ensure_connected)   # started on the first preview
 
         self.dialogs: list[DialogInfo] | None = None
         self.entities: dict[int, Any] = {}      # chat id -> Telethon entity, filled while browsing
@@ -100,6 +102,7 @@ class AppState:
         if self._loop is not None and self._loop is not loop:
             log.info("event loop changed, resetting Telegram connection")
             await self.session.close()
+            await self.streams.close()
             self.dialogs = None
         self._loop = loop
 

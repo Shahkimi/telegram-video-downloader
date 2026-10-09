@@ -13,6 +13,7 @@ import flet as ft
 
 from tgdl.engine.models import DownloadItem, ItemState
 from tgdl.storage import hidden_by
+from tgdl.stream import StreamSource
 from tgdl.telegram.browse import MediaEntry, fetch_media
 from tgdl.telegram.dialogs import ChatCategory
 from tgdl.telegram.resolve import MediaFilter, ResolvedMsg, scan_channel
@@ -20,6 +21,7 @@ from tgdl.telegram.session import LoginError
 from tgdl.util import format_eta, format_size, format_speed
 
 from ..widgets import cover, empty_state, muted, safe_update
+from . import player
 
 if TYPE_CHECKING:
     from ..app import App
@@ -64,10 +66,19 @@ class MediaRow:
         self.entry = entry
         self.status = ""
         self.check = ft.Checkbox(value=False, visible=False, on_change=lambda e: view.toggle(entry.msg_id))
-        self.thumb = ft.Container(
-            width=64, height=48, border_radius=6, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST, alignment=ft.Alignment.CENTER,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        self.thumb_img = ft.Container(
+            width=64, height=48, alignment=ft.Alignment.CENTER,
             content=ft.Icon(ft.Icons.MOVIE if entry.is_video else ft.Icons.INSERT_DRIVE_FILE, color=ft.Colors.ON_SURFACE_VARIANT),
+        )
+        layers: list[ft.Control] = [self.thumb_img]
+        if entry.is_video:  # tap the picture to watch before downloading
+            layers.append(ft.Container(width=64, height=48, alignment=ft.Alignment.CENTER, content=ft.Icon(
+                ft.Icons.PLAY_CIRCLE_FILL, color="#E6FFFFFF", size=24)))
+        self.thumb = ft.Container(
+            width=64, height=48, border_radius=6, bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS, tooltip="Watch" if entry.is_video else None,
+            on_click=(lambda e: view.watch(entry)) if entry.is_video else None,
+            content=ft.Stack(layers, width=64, height=48),
         )
         self.name = ft.Text(entry.caption or entry.name, size=14, weight=ft.FontWeight.W_500, max_lines=2,
                             overflow=ft.TextOverflow.ELLIPSIS)
@@ -86,7 +97,7 @@ class MediaRow:
         )
 
     def set_thumb(self, data: bytes) -> None:
-        self.thumb.content = ft.Image(src=data, fit=ft.BoxFit.COVER, width=64, height=48)
+        self.thumb_img.content = ft.Image(src=data, fit=ft.BoxFit.COVER, width=64, height=48)
         safe_update(self.thumb)
 
     def set_selected(self, selecting: bool, selected: bool) -> None:
@@ -459,6 +470,25 @@ class ChannelView:
         self.on_downloads_changed()
         return added
 
+    def watch(self, entry: MediaEntry) -> None:
+        """Play a video: the saved file when it is downloaded, otherwise streamed from Telegram."""
+        if not player.available():
+            self.app.toast("The video player is not part of this build", error=True)
+            return
+        title = entry.caption or entry.name
+        record = self.state.history.lookup(self.chat_id, entry.msg_id)
+        if record is not None and record.exists:
+            page = player.PlayerPage(self.app, title, path=record.path)
+        else:
+            if entry.message is None or self.entity is None:
+                self.app.toast("Still opening the chat, try again in a moment")
+                return
+            f = getattr(entry.message, "file", None)
+            source = StreamSource(entry.message, self.entity, entry.size, mime=getattr(f, "mime_type", None) or "video/mp4",
+                                  name=entry.name)
+            page = player.PlayerPage(self.app, title, source=source, on_download=lambda: self.download([entry]))
+        self.app.page.run_task(page.open)
+
     def _own(self, items: list[DownloadItem]) -> None:
         """Items queued from this page belong to this chat, whatever Telethon reports for the entity."""
         for item in items:
@@ -493,6 +523,8 @@ class ChannelView:
                 fn()
             return handler
 
+        if entry.is_video:
+            buttons.append(ft.Button("Watch", icon=ft.Icons.PLAY_ARROW, on_click=close_then(lambda: self.watch(entry))))
         if status in ("none", "failed"):
             buttons.append(ft.Button("Download", icon=ft.Icons.DOWNLOAD, on_click=close_then(lambda: self.download([entry]))))
         if record is not None and record.exists:
