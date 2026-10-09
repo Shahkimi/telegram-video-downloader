@@ -1,558 +1,73 @@
 # =====================================================================
-# Telegram Private Video Downloader
+# Telegram Private Video Downloader  (command line)
 # =====================================================================
-# This script logs into Telegram using your API ID & Hash and
-# downloads video files from a designated channel or specific post links.
-# It automatically reads configurations from a local '.env' file.
+# Logs into Telegram with your API ID & Hash and downloads videos and
+# files from channels, groups and post links. Other sites (YouTube,
+# TikTok, ...) work through yt-dlp. You can add your own link formats
+# in menu [5]. Settings come from the local '.env' file.
+#
+# The download engine lives in apk/src/tgdl and is shared with the
+# Android app (see apk/README.md).
 # =====================================================================
 
-import os
-import sys
-import io
-import re
 import asyncio
+import getpass
+import io
+import logging
+import os
+import re
 import sqlite3
-import time
+import sys
 
-if sys.stdout and getattr(sys.stdout, 'encoding', None) and sys.stdout.encoding.lower() != 'utf-8':
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(ROOT, "apk", "src"))
+
+if sys.stdout and getattr(sys.stdout, "encoding", None) and sys.stdout.encoding.lower() != "utf-8":
     try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-if sys.stderr and getattr(sys.stderr, 'encoding', None) and sys.stderr.encoding.lower() != 'utf-8':
+if sys.stderr and getattr(sys.stderr, "encoding", None) and sys.stderr.encoding.lower() != "utf-8":
     try:
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-from dotenv import load_dotenv
-from telethon import TelegramClient, errors
-from telethon.tl.types import Channel, Chat
 from rich.console import Console
-
+from rich.markup import escape
 from rich.progress import (
-    Progress,
-    TextColumn,
     BarColumn,
     DownloadColumn,
-    TransferSpeedColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
     TimeRemainingColumn,
-    SpinnerColumn
+    TransferSpeedColumn,
 )
 
-# Load configuration from .env file
-load_dotenv(override=True)
+from tgdl import __version__ as CORE_VERSION
+from tgdl import crypto_backend, diagnostics
+from tgdl.config import GB, EnvConfigStore, parse_channel
+from tgdl.engine.manager import DownloadManager
+from tgdl.engine.models import ItemState
+from tgdl.engine.ytdlp_dl import detect_ffmpeg
+from tgdl.links.router import route
+from tgdl.links.rules import LinkRule, RuleError, RuleSet
+from tgdl.paths import resolve_paths
+from tgdl.telegram.dialogs import ChatCategory, list_dialogs
+from tgdl.telegram.resolve import MediaFilter, resolve_targets, scan_channel
+from tgdl.telegram.session import LoginError, LoginStep, TelegramSession
+
+# Library messages would garble the progress bars; this UI prints what matters itself.
+logging.getLogger("tgdl").addHandler(logging.NullHandler())
+logging.getLogger("tgdl").propagate = False
 
 console = Console()
+PATHS = resolve_paths("cli", ROOT)
+STORE = EnvConfigStore(PATHS.config_file)
 
-# ---------------------------------------------------------------------
-# Configuration Reading and Validation
-# ---------------------------------------------------------------------
-
-api_id_raw = os.getenv("API_ID")
-api_hash = os.getenv("API_HASH")
-channel_id_raw = os.getenv("CHANNEL_ID")
-
-default_pc_downloads = os.path.join(os.path.expanduser("~"), "Downloads", "Telegram Downloads")
-downloads_dir = os.getenv("DOWNLOADS_DIR", default_pc_downloads)
-if downloads_dir == "downloads":
-    downloads_dir = default_pc_downloads
-max_total_size_raw = os.getenv("MAX_TOTAL_SIZE", str(20 * 1024 * 1024 * 1024))
-
-
-
-# Parsed default CHANNEL_ID (if provided)
-channel_id = None
-if channel_id_raw:
-    try:
-        if channel_id_raw.startswith("-") or channel_id_raw.isdigit():
-            channel_id = int(channel_id_raw)
-        else:
-            channel_id = channel_id_raw
-    except ValueError:
-        channel_id = channel_id_raw
-
-# Validating Max Size Limit
-try:
-    MAX_TOTAL_SIZE = int(max_total_size_raw)
-except ValueError:
-    print(f"\n[WARNING] Invalid MAX_TOTAL_SIZE value. Using default of 20 GB.")
-    MAX_TOTAL_SIZE = 20 * 1024 * 1024 * 1024
-
-# ---------------------------------------------------------------------
-# Telegram Client Lazy Initialization
-# ---------------------------------------------------------------------
-
-client = None
-
-def get_client():
-    """
-    Returns an initialized TelegramClient instance if API credentials exist in .env, else None.
-    """
-    global client
-    load_dotenv(override=True)
-    api_id_raw = os.getenv("API_ID")
-    api_hash_raw = os.getenv("API_HASH")
-
-    api_id = 0
-    if api_id_raw:
-        try:
-            api_id = int(api_id_raw)
-        except ValueError:
-            api_id = 0
-    api_hash = api_hash_raw.strip() if api_hash_raw else ""
-
-    if not api_id or not api_hash:
-        return None
-
-    if client is None:
-        client = TelegramClient("session", api_id, api_hash)
-    elif getattr(client, 'api_id', None) != api_id or getattr(client, 'api_hash', None) != api_hash:
-        client = TelegramClient("session", api_id, api_hash)
-
-    return client
-
-
-async def ensure_telegram_logged_in(force_credentials=False):
-    """
-    Ensures that Telegram client is initialized, credentials exist in .env, and user is authorized.
-    If API credentials are missing or force_credentials is True, prompts user for API_ID & API_HASH.
-    Then prompts for phone number & 2FA if not logged in.
-    """
-    global client
-    c = get_client()
-
-    if c is None or force_credentials:
-        curr_api_id = os.getenv("API_ID", "")
-        curr_api_hash = os.getenv("API_HASH", "")
-
-        print("\n[INFO] Enter your Telegram API Credentials (get from https://my.telegram.org):")
-        
-        while True:
-            prompt_id = f"Enter App API_ID (Press Enter to keep '{curr_api_id}'): " if curr_api_id else "Enter App API_ID: "
-            in_id = input(prompt_id).strip()
-            if not in_id and curr_api_id:
-                in_id = curr_api_id
-            if in_id.isdigit():
-                break
-            print("[ERROR] API_ID must be a numeric integer.")
-
-        while True:
-            prompt_hash = f"Enter App API_HASH (Press Enter to keep '{curr_api_hash}'): " if curr_api_hash else "Enter App API_HASH: "
-            in_hash = input(prompt_hash).strip()
-            if not in_hash and curr_api_hash:
-                in_hash = curr_api_hash
-            if in_hash:
-                break
-            print("[ERROR] API_HASH cannot be empty.")
-
-        update_env_file(in_id, in_hash)
-        c = get_client()
-
-    if not c.is_connected():
-        await c.connect()
-
-    if not await c.is_user_authorized():
-        print("\nConnecting to Telegram authentication...")
-        await c.start()
-
-    return c
-
-# Limit concurrent downloads to 3 files to avoid FloodWaitError (Telegram rate-limits)
-DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
-
-# ---------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------
-
-def update_env_file(new_api_id, new_api_hash):
-    """
-    Updates or appends API_ID and API_HASH in local .env file.
-    """
-    env_path = ".env"
-    env_lines = []
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            env_lines = f.readlines()
-
-    api_id_found = False
-    api_hash_found = False
-
-    new_lines = []
-    for line in env_lines:
-        if line.strip().startswith("API_ID="):
-            new_lines.append(f"API_ID={new_api_id}\n")
-            api_id_found = True
-        elif line.strip().startswith("API_HASH="):
-            new_lines.append(f"API_HASH={new_api_hash}\n")
-            api_hash_found = True
-        else:
-            new_lines.append(line)
-
-    if not api_id_found:
-        new_lines.append(f"API_ID={new_api_id}\n")
-    if not api_hash_found:
-        new_lines.append(f"API_HASH={new_api_hash}\n")
-
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
-
-    os.environ["API_ID"] = str(new_api_id)
-    os.environ["API_HASH"] = str(new_api_hash)
-
-def clean_filename(name):
-    """
-    Remove invalid characters from filename and clean extra whitespaces.
-    """
-    cleaned = re.sub(r'[\\/*?:"<>|]', "", name)
-    cleaned = re.sub(r'\s+', " ", cleaned).strip()
-    return cleaned
-
-
-def parse_telegram_link(link_input, default_channel_id=None):
-    """
-    Parses a Telegram message link or ID and returns a list of (entity_id_or_username, message_id).
-    Supports:
-      - https://t.me/c/1234567890/456
-      - https://t.me/c/1234567890/456-460 (range)
-      - https://t.me/channel_username/456
-      - https://t.me/channel_username/456-460 (range)
-      - https://web.telegram.org/k/#-1001234567890/456
-      - 456 or 456-460 (message ID or range using default_channel_id)
-    """
-    link_input = link_input.strip()
-    if not link_input:
-        return []
-
-    # Single or range numeric ID: 456 or 456-460
-    match_num_range = re.match(r'^(\d+)-(\d+)$', link_input)
-    if match_num_range and default_channel_id:
-        start_id = int(match_num_range.group(1))
-        end_id = int(match_num_range.group(2))
-        if start_id > end_id:
-            start_id, end_id = end_id, start_id
-        return [(default_channel_id, msg_id) for msg_id in range(start_id, end_id + 1)]
-
-    if link_input.isdigit() and default_channel_id:
-        return [(default_channel_id, int(link_input))]
-
-    # web.telegram.org private channel range link
-    match_web_range = re.search(r'web\.telegram\.org/[a-z]/#-?100(\d+)/(\d+)-(\d+)', link_input) or re.search(r'web\.telegram\.org/[a-z]/#-?(\d+)/(\d+)-(\d+)', link_input)
-    if match_web_range:
-        raw_cid = match_web_range.group(1)
-        start_id = int(match_web_range.group(2))
-        end_id = int(match_web_range.group(3))
-        if start_id > end_id:
-            start_id, end_id = end_id, start_id
-        chan_id = int(f"-100{raw_cid}")
-        return [(chan_id, msg_id) for msg_id in range(start_id, end_id + 1)]
-
-    # web.telegram.org private channel single link
-    match_web = re.search(r'web\.telegram\.org/[a-z]/#-?100(\d+)/(\d+)', link_input) or re.search(r'web\.telegram\.org/[a-z]/#-?(\d+)/(\d+)', link_input)
-    if match_web:
-        raw_cid = match_web.group(1)
-        msg_id = int(match_web.group(2))
-        chan_id = int(f"-100{raw_cid}")
-        return [(chan_id, msg_id)]
-
-    # Private channel range link: t.me/c/1234567890/456-460 or telegram.me/c/1234567890/456-460
-    match_private_range = re.search(r'(?:t\.me|telegram\.me)/c/(\d+)/(\d+)-(\d+)', link_input)
-    if match_private_range:
-        raw_cid = match_private_range.group(1)
-        start_id = int(match_private_range.group(2))
-        end_id = int(match_private_range.group(3))
-        if start_id > end_id:
-            start_id, end_id = end_id, start_id
-        chan_id = int(f"-100{raw_cid}")
-        return [(chan_id, msg_id) for msg_id in range(start_id, end_id + 1)]
-
-    # Private channel single link: t.me/c/1234567890/456 or telegram.me/c/1234567890/456
-    match_private = re.search(r'(?:t\.me|telegram\.me)/c/(\d+)/(\d+)', link_input)
-    if match_private:
-        raw_cid = match_private.group(1)
-        msg_id = int(match_private.group(2))
-        chan_id = int(f"-100{raw_cid}")
-        return [(chan_id, msg_id)]
-
-    # Public channel range link: t.me/username/456-460 or telegram.me/username/456-460
-    match_public_range = re.search(r'(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)/(\d+)-(\d+)', link_input)
-    if match_public_range:
-        chan_username = match_public_range.group(1)
-        start_id = int(match_public_range.group(2))
-        end_id = int(match_public_range.group(3))
-        if start_id > end_id:
-            start_id, end_id = end_id, start_id
-        return [(chan_username, msg_id) for msg_id in range(start_id, end_id + 1)]
-
-    # Public channel single link: t.me/username/456 or telegram.me/username/456
-    match_public = re.search(r'(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)/(\d+)', link_input)
-    if match_public:
-        chan_username = match_public.group(1)
-        msg_id = int(match_public.group(2))
-        return [(chan_username, msg_id)]
-
-    return []
-
-# ---------------------------------------------------------------------
-# High-Speed Fault-Tolerant Parallel Download Engine
-# ---------------------------------------------------------------------
-
-async def fast_download_media(client, message, peer, output_path, progress_cb=None, parallel_workers=16, chunk_size=512 * 1024, max_retries=5):
-    """
-    High-Speed Parallel Downloader.
-    Splits the file into contiguous byte ranges and downloads them concurrently through
-    Telethon's iter_download, which routes requests to the data center that stores the file,
-    and handles timeouts and short flood waits.
-    A range that keeps failing raises instead of being skipped, so the file on disk is either
-    complete and byte-exact or the download fails. Nothing is ever zero-padded.
-    """
-    file_size = getattr(message.file, "size", 0) if message.file else 0
-    doc = getattr(message.media, 'document', None) if message and message.media else None
-
-    async def single_stream_download():
-        if client:
-            result = await client.download_media(message, file=output_path, progress_callback=progress_cb)
-        else:
-            result = await message.download_media(file=output_path, progress_callback=progress_cb)
-        if not result or not os.path.exists(result):
-            raise IOError("Telegram returned no file data")
-        if doc and file_size and os.path.getsize(result) != file_size:
-            raise IOError(f"Incomplete file: expected {file_size} bytes, got {os.path.getsize(result)}")
-        return result
-
-    # Fallback to standard telethon download_media for non-documents or small files (< 1MB)
-    if not client or not doc or not file_size or file_size < 1024 * 1024:
-        return await single_stream_download()
-
-    request_size = chunk_size
-    total_parts = (file_size + request_size - 1) // request_size
-
-    # Tune workers dynamically based on file size
-    if file_size < 50 * 1024 * 1024:
-        workers = 8
-    else:
-        workers = parallel_workers
-    workers = max(1, min(workers, total_parts))
-
-    # Split the file into one contiguous range per worker, aligned to request_size
-    parts_per_worker = (total_parts + workers - 1) // workers
-    ranges = []
-    for i in range(workers):
-        start = i * parts_per_worker * request_size
-        end = min(start + parts_per_worker * request_size, file_size)
-        if start < end:
-            ranges.append((start, end))
-
-    # Pre-allocate output file so each range can be written at its own offset
-    with open(output_path, "wb") as f:
-        f.truncate(file_size)
-
-    downloaded_bytes = 0
-    file_write_lock = asyncio.Lock()
-    current_doc = doc
-
-    async def refresh_document():
-        nonlocal current_doc
-        fresh_msg = await client.get_messages(peer, ids=message.id)
-        fresh_doc = getattr(fresh_msg.media, 'document', None) if fresh_msg and fresh_msg.media else None
-        if not fresh_doc or fresh_doc.id != doc.id:
-            raise IOError("Message media changed or is no longer available")
-        current_doc = fresh_doc
-
-    out_fp = open(output_path, "r+b")
-
-    async def download_range(start, end):
-        nonlocal downloaded_bytes
-        pos = start
-        failures = 0
-        while pos < end:
-            stream = client.iter_download(
-                current_doc,
-                offset=pos,
-                limit=(end - pos + request_size - 1) // request_size,
-                request_size=request_size,
-                file_size=file_size
-            )
-            try:
-                async for chunk in stream:
-                    chunk = bytes(chunk[:end - pos])
-                    if not chunk:
-                        break
-                    async with file_write_lock:
-                        out_fp.seek(pos)
-                        out_fp.write(chunk)
-                    pos += len(chunk)
-                    downloaded_bytes += len(chunk)
-                    failures = 0
-                    if progress_cb:
-                        progress_cb(downloaded_bytes, file_size)
-                    if pos >= end:
-                        break
-
-                if pos < end:
-                    raise IOError(f"Telegram ended the stream early at byte {pos} (expected {end})")
-
-            except (errors.FileReferenceExpiredError, errors.FilerefUpgradeNeededError):
-                failures += 1
-                if failures > max_retries:
-                    raise
-                await refresh_document()
-
-            except errors.FloodWaitError as e:
-                await asyncio.sleep(e.seconds + 1)
-
-            except Exception as e:
-                # CDN-hosted files need decryption that only download_media performs
-                if type(e).__name__ == "_CdnRedirect":
-                    raise
-                failures += 1
-                if failures > max_retries:
-                    raise
-                await asyncio.sleep(min(2 ** failures, 30))
-
-            finally:
-                try:
-                    await stream.close()
-                except Exception:
-                    pass
-
-    tasks = [asyncio.ensure_future(download_range(start, end)) for start, end in ranges]
-    use_single_stream = False
-    try:
-        await asyncio.gather(*tasks)
-    except Exception as e:
-        if type(e).__name__ != "_CdnRedirect":
-            raise
-        use_single_stream = True
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        out_fp.close()
-
-    if use_single_stream:
-        return await single_stream_download()
-
-    actual_size = os.path.getsize(output_path)
-    if downloaded_bytes != file_size or actual_size != file_size:
-        raise IOError(f"Incomplete file: expected {file_size} bytes, received {downloaded_bytes}, on disk {actual_size}")
-
-    return output_path
-
-# ---------------------------------------------------------------------
-# Single File Download Worker
-# ---------------------------------------------------------------------
-
-async def download_worker(message, index, total_count, progress, target_entity=None):
-    """
-    Asynchronous task worker to download a single file with live progress display.
-    Includes parallel chunk downloading, automatic retry, and fresh message re-fetching.
-    """
-    file_size = getattr(message.file, "size", 0) if message.file else 0
-
-    # 1. Try to get title from message text/caption
-    file_name = ""
-    if message.text:
-        first_line = message.text.split("\n")[0].strip()
-        if first_line:
-            file_name = clean_filename(first_line)[:50]
-
-    # 2. Fall back to message.file.name
-    if not file_name and message.file and getattr(message.file, "name", None):
-        file_name = clean_filename(message.file.name)
-
-    # 3. Fall back to date/time format
-    if not file_name:
-        msg_date = getattr(message, "date", None)
-        date_str = msg_date.strftime("%Y%m%d_%H%M%S") if msg_date else f"msg_{message.id}"
-        file_name = f"file_{date_str}"
-
-    # Ensure correct extension (.mp4, .pdf, .png, .jpg, .docx, .zip, etc.)
-    ext = getattr(message.file, "ext", "") if message.file else ""
-    if ext:
-        if not ext.startswith("."):
-            ext = f".{ext}"
-        if not file_name.lower().endswith(ext.lower()):
-            file_name = f"{file_name}{ext}"
-    else:
-        if not os.path.splitext(file_name)[1]:
-            file_name = f"{file_name}.bin"
-
-    async with DOWNLOAD_SEMAPHORE:
-        task_id = progress.add_task(
-            "download",
-            filename=file_name,
-            index=index,
-            total_count=total_count,
-            total=file_size or 1
-        )
-        
-        def progress_cb(received, total):
-            if total:
-                progress.update(task_id, completed=received, total=total)
-        
-        c = get_client() or getattr(message, '_client', None)
-        output_path = os.path.join(downloads_dir, file_name)
-        # Download into a temporary .part file; it is renamed only once complete
-        part_path = f"{output_path}.part"
-        peer = target_entity or getattr(message, 'peer_id', None) or getattr(message, 'input_chat', None) or getattr(message, 'chat_id', None)
-
-        max_retries = 3
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Always remove existing files before starting to ensure clean download from byte 0
-                for path in (output_path, part_path):
-                    if os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-
-                current_msg = message
-                if peer and c:
-                    try:
-                        fresh_msg = await c.get_messages(peer, ids=message.id)
-                        if fresh_msg and fresh_msg.media:
-                            current_msg = fresh_msg
-                    except Exception:
-                        pass
-
-                saved_path = await fast_download_media(
-                    c,
-                    current_msg,
-                    peer,
-                    part_path,
-                    progress_cb=progress_cb
-                )
-                if not saved_path or not os.path.exists(saved_path):
-                    raise IOError("Download produced no file")
-                os.replace(saved_path, output_path)
-
-                progress.remove_task(task_id)
-                progress.console.print(f"✓ [Finished] File ID: {current_msg.id} ({file_name})")
-                return True
-
-            except Exception as e:
-                # Remove partial files on error before retrying
-                for path in (output_path, part_path):
-                    if os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-
-                if attempt < max_retries:
-                    await asyncio.sleep(1.5)
-                    continue
-                else:
-                    progress.remove_task(task_id)
-                    progress.console.print(f"✗ [Failed] File ID: {message.id} ({file_name}). Error: {e}")
-                    return False
-
-APP_VERSION = "v2.6.0"
+APP_VERSION = f"v{CORE_VERSION}"
 
 BANNER = f"""[bold green]
   ██████╗  █████╗ ██████╗ ██╗   ██╗███████╗     ██╗
@@ -560,572 +75,855 @@ BANNER = f"""[bold green]
   ██████╔╝███████║██████╔╝██║   ██║█████╗       ██║
   ██╔═══╝ ██╔══██║██╔══██╗╚██╗ ██╔╝██╔══╝  ██   ██║
   ██║     ██║  ██║██║  ██║ ╚████╔╝ ███████╗╚█████╔╝
-  ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝ ╚════╝ 
+  ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝ ╚════╝
         DEVELOPED BY: PARVEJ | VERSION: {APP_VERSION}[/bold green]
 """
 
+YES = ("y", "yes")
+
+
 # ---------------------------------------------------------------------
-# Downloader Main Function
+# Small helpers
 # ---------------------------------------------------------------------
 
-async def main():
-    os.makedirs(downloads_dir, exist_ok=True)
+def load_rules():
+    rules = RuleSet.load(PATHS.rules_file)
+    if rules.load_error:
+        print(f"[WARNING] {rules.load_error}")
+    broken = [r for r in rules.rules if r.error]
+    for r in broken:
+        print(f"[WARNING] Link rule '{r.id}' is disabled: {r.error}")
+    return rules
 
+
+def yes(answer):
+    return answer.strip().lower() in YES
+
+
+def print_note(note):
+    if note.level == "ok":
+        print(f"✓ {note.text}")
+    elif note.level == "warn":
+        print(f"[WARNING] {note.text}")
+    else:
+        print(f"[ERROR] {note.text}")
+
+
+def make_progress():
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan][Queue {task.fields[index]}/{task.fields[total_count]}][/cyan]"),
+        TextColumn("[bold white]{task.fields[filename]}[/bold white]"),
+        BarColumn(bar_width=25),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        "•",
+        DownloadColumn(),
+        "•",
+        TransferSpeedColumn(),
+        "•",
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+
+
+class RichProgressSink:
+    """Shows one progress bar per file that is actually downloading."""
+
+    def __init__(self, bar):
+        self.bar = bar
+        self.tasks = {}
+
+    def added(self, item):
+        pass
+
+    def started(self, item):
+        self.tasks[item.id] = self.bar.add_task(
+            "download",
+            filename=escape(item.display_name),
+            index=item.index,
+            total_count=item.batch_total,
+            total=item.total or 1,
+        )
+
+    def progress(self, item):
+        task_id = self.tasks.get(item.id)
+        if task_id is not None:
+            self.bar.update(task_id, completed=item.done, total=item.total or 1, filename=escape(item.display_name))
+
+    def finished(self, item):
+        task_id = self.tasks.pop(item.id, None)
+        if task_id is not None:
+            self.bar.remove_task(task_id)
+        ident = getattr(item.message, "id", None) or item.url
+        name = item.display_name
+        if item.state is ItemState.DONE:
+            line = f"✓ [Finished] File ID: {ident} ({name})"
+        elif item.state is ItemState.SKIPPED:
+            line = f"↷ [Skipped] File ID: {ident} ({name}) already downloaded"
+        elif item.state is ItemState.CANCELLED:
+            line = f"✗ [Cancelled] File ID: {ident} ({name})"
+        else:
+            line = f"✗ [Failed] File ID: {ident} ({name}). Error: {item.error}"
+        self.bar.console.print(line, markup=False, highlight=False)
+
+    def log(self, text):
+        self.bar.console.print(text, markup=False, highlight=False)
+
+
+async def run_downloads(session, cfg, enqueue):
+    """Create a queue, let enqueue(manager) fill it, show progress until everything is done."""
+    manager = DownloadManager(session, cfg, PATHS)
+    with make_progress() as progress:
+        manager.sink = RichProgressSink(progress)
+        items = enqueue(manager)
+        try:
+            await manager.wait_idle()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            manager.cancel_all()
+            await manager.wait_idle()
+            raise
+    return items
+
+
+def count_results(items):
+    ok = sum(1 for i in items if i.state in (ItemState.DONE, ItemState.SKIPPED))
+    skipped = sum(1 for i in items if i.state is ItemState.SKIPPED)
+    return ok, skipped, len(items) - ok
+
+
+# ---------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------
+
+def prompt_credentials(cfg):
+    curr_api_id = str(cfg.api_id) if cfg.api_id else ""
+    curr_api_hash = cfg.api_hash
+
+    print("\n[INFO] Enter your Telegram API Credentials (get from https://my.telegram.org):")
+
+    while True:
+        prompt_id = f"Enter App API_ID (Press Enter to keep '{curr_api_id}'): " if curr_api_id else "Enter App API_ID: "
+        in_id = input(prompt_id).strip()
+        if not in_id and curr_api_id:
+            in_id = curr_api_id
+        if in_id.isdigit():
+            break
+        print("[ERROR] API_ID must be a numeric integer.")
+
+    while True:
+        prompt_hash = f"Enter App API_HASH (Press Enter to keep '{curr_api_hash}'): " if curr_api_hash else "Enter App API_HASH: "
+        in_hash = input(prompt_hash).strip()
+        if not in_hash and curr_api_hash:
+            in_hash = curr_api_hash
+        if in_hash:
+            break
+        print("[ERROR] API_HASH cannot be empty.")
+    return in_id, in_hash
+
+
+async def cli_login(session, force_credentials=False):
+    """Walk through API credentials, phone, code and 2FA password. Returns True when logged in."""
+    try:
+        step = await session.start()
+    except LoginError as exc:
+        print(f"\n[ERROR] {exc.message}")
+        if exc.kind != "api_invalid":
+            return False
+        step = LoginStep.NEED_API
+
+    if force_credentials or step is LoginStep.NEED_API:
+        api_id, api_hash = prompt_credentials(STORE.load())
+        try:
+            step = await session.set_api_credentials(api_id, api_hash)
+        except LoginError as exc:
+            print(f"\n[ERROR] {exc.message}")
+            return False
+
+    while step is not LoginStep.READY:
+        try:
+            if step is LoginStep.NEED_API:
+                api_id, api_hash = prompt_credentials(STORE.load())
+                step = await session.set_api_credentials(api_id, api_hash)
+            elif step is LoginStep.NEED_PHONE:
+                print("\nConnecting to Telegram authentication...")
+                phone = input("Enter your phone number with country code (e.g. +60123456789, 0=Cancel): ").strip()
+                if phone in ("", "0"):
+                    return False
+                step = await session.send_code(phone)
+                print("A login code was sent to your Telegram app (or by SMS).")
+            elif step is LoginStep.NEED_CODE:
+                code = input("Enter the login code (r=resend, 0=Cancel): ").strip()
+                if code == "0":
+                    session.cancel_login()
+                    return False
+                if code.lower() == "r":
+                    step = await session.resend_code()
+                    print("A new code was requested.")
+                    continue
+                step = await session.submit_code(code)
+            elif step is LoginStep.NEED_PASSWORD:
+                hint = await session.password_hint()
+                if hint:
+                    print(f"Password hint: {hint}")
+                password = getpass.getpass("Enter your two-step verification password (hidden, Enter=Cancel): ")
+                if not password:
+                    session.cancel_login()
+                    return False
+                step = await session.submit_password(password)
+        except LoginError as exc:
+            print(f"[ERROR] {exc.message}")
+            if exc.kind in ("network", "flood"):
+                return False
+            step = session.step
+    return True
+
+
+async def ensure_login(session):
+    """Used before the download modes. Offers to log in when needed."""
+    try:
+        if await session.is_authorized():
+            return True
+    except LoginError:
+        pass
+    print("\n[INFO] Authentication required to proceed.")
+    if not yes(input("Would you like to login to Telegram now? (Y/N): ")):
+        return False
+    try:
+        ok = await cli_login(session)
+    except Exception as exc:
+        print(f"\n[ERROR] Authentication failed. Detail: {exc}")
+        input("\nPress Enter to return to main menu...")
+        return False
+    if not ok:
+        input("\nPress Enter to return to main menu...")
+    return ok
+
+
+# ---------------------------------------------------------------------
+# Menu: My Account
+# ---------------------------------------------------------------------
+
+async def menu_account(session):
     while True:
         console.clear()
         console.print(BANNER)
-        console.print("[bold green]==================================================[/bold green]")
-        console.print(f"[bold white] Telegram Private Downloader ({APP_VERSION})[/bold white]")
-        console.print("[bold green]==================================================[/bold green]")
-        console.print("Select Download Mode:")
-        console.print("  [1] My Account")
-        console.print("  [2] Download ALL videos from channel (Batch Mode)")
-        console.print("  [3] Download SPECIFIC video(s) by Post/Message Link")
-        console.print("  [4] Download SPECIFIC file(s)/document(s) by Link")
-        console.print("  [5] Exit")
+        console.print("[bold cyan]==================================================[/bold cyan]")
+        console.print("[bold white] My Account Settings[/bold white]")
+        console.print("[bold cyan]==================================================[/bold cyan]")
+        console.print("  [1] Telegram Login")
+        console.print("  [2] Logout Telegram")
+        console.print("  [0] Back to Main Menu")
         console.print("=" * 50)
 
-        mode = input("Enter choice (1-5): ").strip()
+        choice = input("Enter choice (0-2): ").strip()
 
-        if mode == "5":
-            console.print("\n[bold yellow]Exiting downloader. Goodbye![/bold yellow]\n")
-            break
+        if choice == "0":
+            return
 
-        if mode not in ["1", "2", "3", "4", "5"]:
-            console.print("[bold red][ERROR] Invalid choice. Please enter 1, 2, 3, 4, or 5.[/bold red]")
-            input("\nPress Enter to return to main menu...")
+        if choice == "1":
+            console.print("\n[bold cyan]--- Telegram Login ---[/bold cyan]")
+            is_auth = await session.is_authorized()
+
+            if is_auth:
+                me = await session.me()
+                if me:
+                    print(f"\n✓ Currently Logged In as: {me.name} ({'@' + me.username if me.username else 'No Username'} | +{me.phone or 'N/A'})")
+                else:
+                    print("\n✓ Currently Logged In to Telegram.")
+                if not yes(input("\nDo you want to re-login / update API credentials? (Y/N): ")):
+                    continue
+                ok = await cli_login(session, force_credentials=True)
+            else:
+                ok = await cli_login(session)
+
+            me = await session.me() if ok else None
+            if me:
+                print(f"\n✓ Login successful! Account: {me.name} ({'@' + me.username if me.username else 'No Username'} | ID: {me.id})")
+                print("You now have full permission to use all downloader features.")
+            else:
+                print("\n[ERROR] Login failed or interrupted.")
+            input("\nPress Enter to return to My Account menu...")
+
+        elif choice == "2":
+            console.print("\n[bold cyan]--- Logout Telegram ---[/bold cyan]")
+            if not await session.is_authorized():
+                print("\n[INFO] You are not currently logged into any Telegram account.")
+                input("\nPress Enter to return to My Account menu...")
+                continue
+
+            me = await session.me()
+            acc_name = me.name if me and me.name else "your account"
+            if not yes(input(f"\nAre you sure you want to logout from '{acc_name}'? (Y/N): ")):
+                print("[INFO] Logout cancelled. Returning to My Account menu...")
+                continue
+            try:
+                await session.logout()
+                print("\n✓ Successfully logged out from Telegram account.")
+                print("Your session has been cleared.")
+            except Exception as exc:
+                print(f"\n[ERROR] Logout failed. Detail: {exc}")
+            input("\nPress Enter to return to My Account menu...")
+        else:
+            print("[ERROR] Invalid choice. Please enter 0, 1, or 2.")
+            input("\nPress Enter to return to My Account menu...")
+
+
+# ---------------------------------------------------------------------
+# Menu: batch download of a whole channel
+# ---------------------------------------------------------------------
+
+CATEGORY_MENU = {
+    "1": ChatCategory.PRIVATE_CHANNEL,
+    "2": ChatCategory.PRIVATE_GROUP,
+    "3": ChatCategory.PUBLIC_CHANNEL,
+    "4": ChatCategory.PUBLIC_GROUP,
+}
+
+
+async def scan_and_download(session, cfg, entity, title):
+    """Scan one chat for videos, confirm, download. Returns True when the task finished."""
+    client = session.client
+    print(f"Output Directory  : {cfg.downloads_path(PATHS)}/")
+    print(f"Max Download Limit: {cfg.max_total_size_bytes / GB:.2f} GB")
+
+    print("\nScanning messages and detecting video files...")
+    print("-" * 50)
+
+    with console.status("Scanning..."):
+        scan = await scan_channel(client, entity, MediaFilter.VIDEO, cfg.max_total_size_bytes)
+
+    total_files = len(scan.messages)
+    print(f"Found {total_files} video(s) detected in '{title}'.")
+    print(f"Total size budget: {scan.total_size / GB:.2f} GB")
+
+    if scan.limit_reached:
+        print("Note: Stop limit reached during scan. Some newer files were excluded to stay under limits.")
+
+    if not scan.messages:
+        print("No videos found to download.")
+        return False
+
+    if not yes(input("\nContinue download? (Y/N): ")):
+        print("[INFO] Download cancelled. Returning to channel list...")
+        return False
+
+    print("\nStarting Downloads...")
+    print("-" * 50)
+
+    items = await run_downloads(session, cfg, lambda m: m.enqueue_messages(scan.messages, entity, title))
+    ok, skipped, failed = count_results(items)
+
+    print("\n" + "=" * 50)
+    print("Download Summary:")
+    print(f"  Target Channel          : {title}")
+    print(f"  Total Videos Checked    : {total_files}")
+    print(f"  Successfully Downloaded : {ok}")
+    if skipped:
+        print(f"  (already on disk)       : {skipped}")
+    print(f"  Failed Downloads        : {failed}")
+    print(f"  Total Size Budgeted     : {scan.total_size / GB:.2f} GB")
+    print("=" * 50 + "\n")
+
+    input("[Done] Task completed! Press Enter to return to main menu...")
+    return True
+
+
+async def menu_batch(session):
+    if not await ensure_login(session):
+        return
+    client = session.client
+
+    while True:
+        cfg = STORE.load()
+        console.clear()
+        console.print(BANNER)
+        console.print("[bold cyan]Select Target Category:[/bold cyan]")
+        console.print("  [1] Private Channel")
+        console.print("  [2] Private Group")
+        console.print("  [3] Public Channel")
+        console.print("  [4] Public Group")
+        console.print("  [5] Manual ID / Username")
+        console.print("  [0] Back to Main Menu")
+        console.print("=" * 50)
+
+        ctype = input("Enter choice (0-5): ").strip()
+
+        if ctype == "0":
+            return
+
+        if ctype not in ["1", "2", "3", "4", "5"]:
+            print("[ERROR] Invalid choice.")
+            input("\nPress Enter to return to category menu...")
             continue
 
-        # -----------------------------------------------------------------
-        # MODE 1: My Account Settings (Login & Logout)
-        # -----------------------------------------------------------------
-        if mode == "1":
-            while True:
-                console.clear()
-                console.print(BANNER)
-                console.print("[bold cyan]==================================================[/bold cyan]")
-                console.print("[bold white] My Account Settings[/bold white]")
-                console.print("[bold cyan]==================================================[/bold cyan]")
-                console.print("  [1] Telegram Login")
-                console.print("  [2] Logout Telegram")
-                console.print("  [0] Back to Main Menu")
-                console.print("=" * 50)
+        if ctype == "5":
+            default_cid = cfg.default_channel
+            prompt_msg = f"Enter ID / Username (Default: {default_cid}, 0=Back): " if default_cid else "Enter ID / Username (0=Back): "
+            manual_id = input(prompt_msg).strip()
+            if manual_id == "0":
+                continue
+            if not manual_id:
+                manual_id = default_cid
 
-                acc_choice = input("Enter choice (0-2): ").strip()
-
-                if acc_choice == "0":
-                    break
-
-                elif acc_choice == "1":
-                    console.print("\n[bold cyan]--- Telegram Login ---[/bold cyan]")
-                    c = get_client()
-                    is_auth = False
-                    if c:
-                        try:
-                            if not c.is_connected():
-                                await c.connect()
-                            is_auth = await c.is_user_authorized()
-                        except Exception:
-                            is_auth = False
-
-                    if is_auth:
-                        try:
-                            me = await c.get_me()
-                            name = f"{me.first_name or ''} {me.last_name or ''}".strip()
-                            phone = getattr(me, 'phone', 'N/A')
-                            username = f"@{me.username}" if me.username else "No Username"
-                            print(f"\n✓ Currently Logged In as: {name} ({username} | +{phone})")
-                        except Exception:
-                            print("\n✓ Currently Logged In to Telegram.")
-                        
-                        relog = input("\nDo you want to re-login / update API credentials? (Y/N): ").strip().lower()
-                        if relog not in ['y', 'yes']:
-                            continue
-                        c = await ensure_telegram_logged_in(force_credentials=True)
-                    else:
-                        c = await ensure_telegram_logged_in(force_credentials=False)
-
-                    try:
-                        me = await c.get_me()
-                        name = f"{me.first_name or ''} {me.last_name or ''}".strip()
-                        username = f"@{me.username}" if me.username else "No Username"
-                        print(f"\n✓ Login successful! Account: {name} ({username} | ID: {me.id})")
-                        print("You now have full permission to use all downloader features.")
-                    except Exception as e:
-                        print(f"\n[ERROR] Login failed or interrupted. Detail: {e}")
-
-                    input("\nPress Enter to return to My Account menu...")
-
-                elif acc_choice == "2":
-                    console.print("\n[bold cyan]--- Logout Telegram ---[/bold cyan]")
-                    c = get_client()
-                    is_auth = False
-                    if c:
-                        try:
-                            if not c.is_connected():
-                                await c.connect()
-                            is_auth = await c.is_user_authorized()
-                        except Exception:
-                            is_auth = False
-
-                    if not is_auth:
-                        print("\n[INFO] You are not currently logged into any Telegram account.")
-                        input("\nPress Enter to return to My Account menu...")
-                        continue
-
-                    acc_name = "your account"
-                    try:
-                        me = await c.get_me()
-                        acc_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
-                    except Exception:
-                        pass
-
-                    confirm = input(f"\nAre you sure you want to logout from '{acc_name}'? (Y/N): ").strip().lower()
-                    if confirm not in ['y', 'yes']:
-                        print("[INFO] Logout cancelled. Returning to My Account menu...")
-                        continue
-
-                    try:
-                        await c.log_out()
-                        print("\n✓ Successfully logged out from Telegram account.")
-                        print("Your session has been cleared.")
-                    except Exception as e:
-                        print(f"\n[ERROR] Logout failed. Detail: {e}")
-
-                    input("\nPress Enter to return to My Account menu...")
-                else:
-                    print("[ERROR] Invalid choice. Please enter 0, 1, or 2.")
-                    input("\nPress Enter to return to My Account menu...")
-
-        # -----------------------------------------------------------------
-        # Authorization Check for Download Modes (2, 3, 4)
-        # -----------------------------------------------------------------
-        if mode in ["2", "3", "4"]:
-            c = get_client()
-            is_auth = False
-            if c:
-                try:
-                    if not c.is_connected():
-                        await c.connect()
-                    is_auth = await c.is_user_authorized()
-                except Exception:
-                    is_auth = False
-
-            if not is_auth:
-                print("\n[INFO] Authentication required to proceed.")
-                confirm = input("Would you like to login to Telegram now? (Y/N): ").strip().lower()
-                if confirm not in ['y', 'yes']:
-                    continue
-                try:
-                    c = await ensure_telegram_logged_in()
-                except Exception as e:
-                    print(f"\n[ERROR] Authentication failed. Detail: {e}")
-                    input("\nPress Enter to return to main menu...")
-                    continue
-
-        # -----------------------------------------------------------------
-        # MODE 2: Download ALL videos from channel (Batch Mode)
-        # -----------------------------------------------------------------
-        if mode == "2":
-
-            while True:
-                console.clear()
-
-                console.print(BANNER)
-                console.print("[bold cyan]Select Target Category:[/bold cyan]")
-                console.print("  [1] Private Channel")
-                console.print("  [2] Private Group")
-                console.print("  [3] Public Channel")
-                console.print("  [4] Public Group")
-                console.print("  [5] Manual ID / Username")
-                console.print("  [0] Back to Main Menu")
-                console.print("=" * 50)
-                
-                ctype = input("Enter choice (0-5): ").strip()
-
-                if ctype == "0":
-                    break
-
-                if ctype not in ["1", "2", "3", "4", "5"]:
-                    print("[ERROR] Invalid choice.")
-                    input("\nPress Enter to return to category menu...")
-                    continue
-
-                target_entity = None
-                target_title = ""
-                target_id = None
-                category_label = ""
-
-                if ctype == "5":
-                    default_cid = channel_id
-                    prompt_msg = f"Enter ID / Username (Default: {default_cid}, 0=Back): " if default_cid else "Enter ID / Username (0=Back): "
-                    manual_id = input(prompt_msg).strip()
-                    if manual_id == "0":
-                        continue
-                    if not manual_id:
-                        manual_id = default_cid
-
-                    if not manual_id:
-                        print("[ERROR] No Channel ID provided.")
-                        input("\nPress Enter to return to category menu...")
-                        continue
-
-                    try:
-                        if str(manual_id).startswith("-") or str(manual_id).isdigit():
-                            target_id = int(manual_id)
-                        else:
-                            target_id = manual_id
-                        target_entity = await client.get_entity(target_id)
-                        target_title = getattr(target_entity, 'title', str(manual_id))
-                        category_label = "Manual Input"
-                        print(f"\n✓ Success! Selected [{category_label}]: '{target_title}' (ID: {target_id})")
-                    except Exception as e:
-                        print(f"[ERROR] Failed to locate channel '{manual_id}'. Detail: {e}")
-                        input("\nPress Enter to return to category menu...")
-                        continue
-
-                elif ctype in ["1", "2", "3", "4"]:
-                    type_names = {
-                        "1": "Private Channel",
-                        "2": "Private Group",
-                        "3": "Public Channel",
-                        "4": "Public Group"
-                    }
-                    category_label = type_names[ctype]
-                    
-                    print(f"\nFetching your {category_label}s from Telegram...")
-                    
-                    channels_list = []
-                    try:
-                        async for dialog in client.iter_dialogs():
-                            entity = dialog.entity
-                            name = dialog.name or "Unknown Name"
-                            has_username = bool(getattr(entity, 'username', None))
-                            
-                            if isinstance(entity, Channel):
-                                is_broadcast = entity.broadcast
-                                if ctype == "1" and is_broadcast and not has_username:
-                                    channels_list.append((name, dialog.id, entity))
-                                elif ctype == "2" and not is_broadcast and not has_username:
-                                    channels_list.append((name, dialog.id, entity))
-                                elif ctype == "3" and is_broadcast and has_username:
-                                    channels_list.append((name, dialog.id, entity))
-                                elif ctype == "4" and not is_broadcast and has_username:
-                                    channels_list.append((name, dialog.id, entity))
-                            elif isinstance(entity, Chat):
-                                # Basic Chat group is always private group
-                                if ctype == "2":
-                                    channels_list.append((name, dialog.id, entity))
-                    except Exception as e:
-                        print(f"[ERROR] Failed to fetch dialogs. Detail: {e}")
-                        input("\nPress Enter to return to category menu...")
-                        continue
-
-                    if not channels_list:
-                        print(f"[WARNING] No {category_label}s found in your Telegram account.")
-                        input("\nPress Enter to return to category menu...")
-                        continue
-
-                    # Sort alphabetically (A to Z) case-insensitively
-                    channels_list.sort(key=lambda x: x[0].strip().lower())
-
-                    # Loop for channel selection within this category
-                    download_completed = False
-                    while True:
-                        print(f"\nAvailable {category_label}s:")
-                        print("=" * 65)
-                        print(f"  [ 0] Back to Category Menu")
-                        for idx, (name, cid, ent) in enumerate(channels_list, start=1):
-                            display_name = name.replace("\n", " ").strip()[:40]
-                            print(f"  [{idx:2d}] {display_name:<40} (ID: {cid})")
-                        print("=" * 65)
-
-                        sel = input(f"\nSelect Number (1-{len(channels_list)}, 0=Back): ").strip()
-                        if sel == "0":
-                            break
-                        if not sel.isdigit() or not (1 <= int(sel) <= len(channels_list)):
-                            print("[ERROR] Invalid selection.")
-                            continue
-
-                        selected_item = channels_list[int(sel) - 1]
-                        target_title = selected_item[0]
-                        target_id = selected_item[1]
-                        target_entity = selected_item[2]
-
-                        print(f"\n✓ Success! Selected [{category_label}]: '{target_title}' (ID: {target_id})")
-                        print(f"Output Directory  : {downloads_dir}/")
-                        print(f"Max Download Limit: {MAX_TOTAL_SIZE / (1024**3):.2f} GB")
-
-                        print("\nScanning messages and detecting video files...")
-                        print("-" * 50)
-
-                        download_queue = []
-                        total_scanned_size = 0
-                        limit_reached = False
-
-                        async for message in client.iter_messages(target_entity, reverse=True):
-                            if not message.video and not (message.document and getattr(message.document, 'mime_type', '').startswith('video/')):
-                                continue
-
-                            file_size = getattr(message.file, "size", 0) if message.file else 0
-
-                            if total_scanned_size + file_size > MAX_TOTAL_SIZE:
-                                limit_reached = True
-                                break
-
-                            download_queue.append(message)
-                            total_scanned_size += file_size
-
-                        total_files = len(download_queue)
-                        print(f"Found {total_files} video(s) detected in '{target_title}'.")
-                        print(f"Total size budget: {total_scanned_size / (1024**3):.2f} GB")
-                        
-                        if limit_reached:
-                            print("Note: Stop limit reached during scan. Some newer files were excluded to stay under limits.")
-
-                        if not download_queue:
-                            print("No videos found to download.")
-                            continue
-
-                        confirm = input("\nContinue download? (Y/N): ").strip().lower()
-                        if confirm not in ['y', 'yes']:
-                            print("[INFO] Download cancelled. Returning to channel list...")
-                            continue
-
-                        print("\nStarting Downloads...")
-                        print("-" * 50)
-
-                        with Progress(
-                            SpinnerColumn(),
-                            TextColumn("[cyan][Queue {task.fields[index]}/{task.fields[total_count]}][/cyan]"),
-                            TextColumn("[bold white]{task.fields[filename]}[/bold white]"),
-                            BarColumn(bar_width=25),
-                            "[progress.percentage]{task.percentage:>3.0f}%",
-                            "•",
-                            DownloadColumn(),
-                            "•",
-                            TransferSpeedColumn(),
-                            "•",
-                            TimeRemainingColumn(),
-                            console=console,
-                            transient=True
-                        ) as progress:
-                            tasks = [
-                                download_worker(msg, idx + 1, total_files, progress)
-                                for idx, msg in enumerate(download_queue)
-                            ]
-                            results = await asyncio.gather(*tasks)
-
-                        success_count = sum(1 for r in results if r)
-
-                        print("\n" + "=" * 50)
-                        print("Download Summary:")
-                        print(f"  Target Channel          : {target_title}")
-                        print(f"  Total Videos Checked    : {total_files}")
-                        print(f"  Successfully Downloaded : {success_count}")
-                        print(f"  Failed Downloads        : {total_files - success_count}")
-                        print(f"  Total Size Budgeted     : {total_scanned_size / (1024**3):.2f} GB")
-                        print("=" * 50 + "\n")
-                        
-                        input("[Done] Task completed! Press Enter to return to main menu...")
-                        download_completed = True
-                        break
-
-                    if download_completed:
-                        break
-
-        # -----------------------------------------------------------------
-        # MODE 3: Download Specific Video(s) by Link
-        # -----------------------------------------------------------------
-        elif mode == "3":
-            user_input = input("\nPaste Link(s) (0=Back): ").strip()
-            if not user_input or user_input == "0":
+            if not manual_id:
+                print("[ERROR] No Channel ID provided.")
+                input("\nPress Enter to return to category menu...")
                 continue
 
-            raw_links = re.split(r'[\s,]+', user_input)
-            parsed_targets = []
-            for l in raw_links:
-                parsed = parse_telegram_link(l, channel_id)
-                parsed_targets.extend(parsed)
-
-            if not parsed_targets:
-                print("[WARNING] Invalid link or could not parse message ID.")
-                input("\nPress Enter to return to main menu...")
+            try:
+                target_id = parse_channel(manual_id)
+                target_entity = await client.get_entity(target_id)
+                target_title = getattr(target_entity, "title", str(manual_id))
+                print(f"\n✓ Success! Selected [Manual Input]: '{target_title}' (ID: {target_id})")
+            except Exception as exc:
+                print(f"[ERROR] Failed to locate channel '{manual_id}'. Detail: {exc}")
+                input("\nPress Enter to return to category menu...")
                 continue
 
-            download_queue = []
+            if await scan_and_download(session, cfg, target_entity, target_title):
+                return
+            continue
 
-            for target_entity, msg_id in parsed_targets:
-                try:
-                    try:
-                        entity = await client.get_entity(target_entity)
-                    except Exception:
-                        await client.get_dialogs(limit=100)
-                        entity = await client.get_entity(target_entity)
+        category = CATEGORY_MENU[ctype]
+        print(f"\nFetching your {category.label}s from Telegram...")
+        try:
+            channels_list = await list_dialogs(client, category)
+        except Exception as exc:
+            print(f"[ERROR] Failed to fetch dialogs. Detail: {exc}")
+            input("\nPress Enter to return to category menu...")
+            continue
 
-                    message = await client.get_messages(entity, ids=msg_id)
-                    
-                    if not message:
-                        print(f"[WARNING] Message ID {msg_id} not found in target channel.")
-                        continue
+        if not channels_list:
+            print(f"[WARNING] No {category.label}s found in your Telegram account.")
+            input("\nPress Enter to return to category menu...")
+            continue
 
-                    if not message.video and not (message.document and getattr(message.document, 'mime_type', '').startswith('video/')):
-                        print(f"[WARNING] Message ID {msg_id} does not contain a video file.")
-                        continue
+        while True:
+            print(f"\nAvailable {category.label}s:")
+            print("=" * 65)
+            print("  [ 0] Back to Category Menu")
+            for idx, dialog in enumerate(channels_list, start=1):
+                display_name = dialog.name.replace("\n", " ").strip()[:40]
+                print(f"  [{idx:2d}] {display_name:<40} (ID: {dialog.id})")
+            print("=" * 65)
 
-                    download_queue.append((message, entity))
-                    print(f"✓ Found video in Message ID {msg_id}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to fetch message ID {msg_id}. Detail: {e}")
-
-            total_files = len(download_queue)
-            if not download_queue:
-                print("\nNo valid video messages were found from the provided link(s).")
-                input("\nPress Enter to return to main menu...")
+            sel = input(f"\nSelect Number (1-{len(channels_list)}, 0=Back): ").strip()
+            if sel == "0":
+                break
+            if not sel.isdigit() or not (1 <= int(sel) <= len(channels_list)):
+                print("[ERROR] Invalid selection.")
                 continue
 
-            print(f"\nFound {total_files} video(s) ready to download.")
-            confirm = input("Continue download? (Y/N): ").strip().lower()
-            if confirm not in ['y', 'yes']:
-                print("[INFO] Download cancelled. Returning to main menu...")
-                continue
+            chosen = channels_list[int(sel) - 1]
+            print(f"\n✓ Success! Selected [{category.label}]: '{chosen.name}' (ID: {chosen.id})")
+            if await scan_and_download(session, cfg, chosen.entity, chosen.name):
+                return
 
-            print("\nStarting Downloads...")
-            print("-" * 50)
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[cyan][Queue {task.fields[index]}/{task.fields[total_count]}][/cyan]"),
-                TextColumn("[bold white]{task.fields[filename]}[/bold white]"),
-                BarColumn(bar_width=25),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                "•",
-                DownloadColumn(),
-                "•",
-                TransferSpeedColumn(),
-                "•",
-                TimeRemainingColumn(),
-                console=console,
-                transient=True
-            ) as progress:
-                tasks = [
-                    download_worker(item[0], idx + 1, total_files, progress, target_entity=item[1])
-                    for idx, item in enumerate(download_queue)
-                ]
-                results = await asyncio.gather(*tasks)
-
-            success_count = sum(1 for r in results if r)
-
-            print("\n" + "=" * 50)
-            print("Download Summary:")
-            print(f"  Total Requested Videos  : {total_files}")
-            print(f"  Successfully Downloaded : {success_count}")
-            print(f"  Failed Downloads        : {total_files - success_count}")
-            print("=" * 50 + "\n")
-            
-            input("[Done] Task completed! Press Enter to return to main menu...")
-
-        # -----------------------------------------------------------------
-        # MODE 4: Download Specific File(s)/Document(s) by Link (PDF, Images, Docs, etc.)
-        # -----------------------------------------------------------------
-        elif mode == "4":
-            user_input = input("\nPaste Link(s) (0=Back): ").strip()
-            if not user_input or user_input == "0":
-                continue
-
-            raw_links = re.split(r'[\s,]+', user_input)
-            parsed_targets = []
-            for l in raw_links:
-                parsed = parse_telegram_link(l, channel_id)
-                parsed_targets.extend(parsed)
-
-            if not parsed_targets:
-                print("[WARNING] Invalid link or could not parse message ID.")
-                input("\nPress Enter to return to main menu...")
-                continue
-
-            download_queue = []
-
-            for target_entity, msg_id in parsed_targets:
-                try:
-                    try:
-                        entity = await client.get_entity(target_entity)
-                    except Exception:
-                        await client.get_dialogs(limit=100)
-                        entity = await client.get_entity(target_entity)
-
-                    message = await client.get_messages(entity, ids=msg_id)
-                    
-                    if not message:
-                        print(f"[WARNING] Message ID {msg_id} not found in target channel.")
-                        continue
-
-                    if not message.file:
-                        print(f"[WARNING] Message ID {msg_id} does not contain any file/document.")
-                        continue
-
-                    if message.video or (message.document and getattr(message.document, 'mime_type', '').startswith('video/')):
-                        print(f"[WARNING] Message ID {msg_id} is a video file. (Use Option 3 for videos)")
-                        continue
-
-                    download_queue.append((message, entity))
-                    ext = getattr(message.file, "ext", "") or ""
-                    print(f"✓ Found file ({ext.upper().strip('.') or 'DOCUMENT'}) in Message ID {msg_id}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to fetch message ID {msg_id}. Detail: {e}")
-
-            total_files = len(download_queue)
-            if not download_queue:
-                print("\nNo valid files/documents were found from the provided link(s).")
-                input("\nPress Enter to return to main menu...")
-                continue
-
-            print(f"\nFound {total_files} file(s)/document(s) ready to download.")
-            confirm = input("Continue download? (Y/N): ").strip().lower()
-            if confirm not in ['y', 'yes']:
-                print("[INFO] Download cancelled. Returning to main menu...")
-                continue
-
-            print("\nStarting Downloads...")
-            print("-" * 50)
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[cyan][Queue {task.fields[index]}/{task.fields[total_count]}][/cyan]"),
-                TextColumn("[bold white]{task.fields[filename]}[/bold white]"),
-                BarColumn(bar_width=25),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                "•",
-                DownloadColumn(),
-                "•",
-                TransferSpeedColumn(),
-                "•",
-                TimeRemainingColumn(),
-                console=console,
-                transient=True
-            ) as progress:
-                tasks = [
-                    download_worker(item[0], idx + 1, total_files, progress, target_entity=item[1])
-                    for idx, item in enumerate(download_queue)
-                ]
-                results = await asyncio.gather(*tasks)
-
-            success_count = sum(1 for r in results if r)
-
-            print("\n" + "=" * 50)
-            print("Download Summary:")
-            print(f"  Total Requested Files   : {total_files}")
-            print(f"  Successfully Downloaded : {success_count}")
-            print(f"  Failed Downloads        : {total_files - success_count}")
-            print("=" * 50 + "\n")
-            
-            input("[Done] Task completed! Press Enter to return to main menu...")
 
 # ---------------------------------------------------------------------
-# Start Script
+# Menu: download by link (3 = videos and other sites, 4 = files)
 # ---------------------------------------------------------------------
+
+async def menu_links(session, video_mode):
+    cfg = STORE.load()
+    if not await ensure_login(session):
+        return
+    client = session.client
+
+    user_input = input("\nPaste Link(s) (0=Back): ").strip()
+    if not user_input or user_input == "0":
+        return
+
+    rules = load_rules()
+    routed = route(
+        user_input,
+        rules,
+        default_channel=cfg.default_channel,
+        ytdlp_enabled=video_mode and cfg.ytdlp.enabled,
+        range_cap=cfg.range_cap,
+    )
+    for warning in routed.warnings:
+        print(f"[WARNING] {warning}")
+
+    if routed.empty:
+        print("[WARNING] Invalid link or could not parse message ID.")
+        input("\nPress Enter to return to main menu...")
+        return
+
+    for ch in routed.channels:
+        print(f"[INFO] {ch.source} is a whole channel. Use option 2 > Manual ID / Username ({ch.peer}) to download everything in it.")
+
+    media = MediaFilter.VIDEO if video_mode else MediaFilter.FILE
+    resolved = await resolve_targets(client, routed.telegram, media, on_note=print_note)
+    for ext in routed.external:
+        print(f"✓ Will download with yt-dlp: {ext.url}")
+    if routed.external and not detect_ffmpeg():
+        print("[INFO] ffmpeg was not found: only single-file formats can be downloaded from other sites (no audio/video merging).")
+
+    total_files = len(resolved.found) + len(routed.external)
+    noun = "video(s)" if video_mode else "file(s)/document(s)"
+    if not total_files:
+        print("\nNo valid video messages were found from the provided link(s)." if video_mode
+              else "\nNo valid files/documents were found from the provided link(s).")
+        input("\nPress Enter to return to main menu...")
+        return
+
+    print(f"\nFound {total_files} {noun} ready to download.")
+    if not yes(input("Continue download? (Y/N): ")):
+        print("[INFO] Download cancelled. Returning to main menu...")
+        return
+
+    print("\nStarting Downloads...")
+    print("-" * 50)
+
+    def enqueue(manager):
+        return manager.enqueue_telegram(resolved.found) + manager.enqueue_external(routed.external)
+
+    items = await run_downloads(session, cfg, enqueue)
+    ok, skipped, failed = count_results(items)
+
+    print("\n" + "=" * 50)
+    print("Download Summary:")
+    print(f"  Total Requested {'Videos ' if video_mode else 'Files  '}: {total_files}")
+    print(f"  Successfully Downloaded : {ok}")
+    if skipped:
+        print(f"  (already on disk)       : {skipped}")
+    print(f"  Failed Downloads        : {failed}")
+    print("=" * 50 + "\n")
+
+    input("[Done] Task completed! Press Enter to return to main menu...")
+
+
+# ---------------------------------------------------------------------
+# Menu: link rules
+# ---------------------------------------------------------------------
+
+RULE_HELP = """
+A link rule teaches the downloader a new kind of link.
+Pattern placeholders (template style):
+  {channel}  channel username or id      {msg}   message id, ranges like 12-20 work
+  {username} public username             {cid}   private channel number (t.me/c/NUMBER)
+  {topic}    forum topic (ignored)       {*}     any text in one path segment      {**}  anything
+Example: mysite.com/{channel}/{msg}   matches   https://mysite.com/durov/12
+"""
+
+TARGET_CHOICES = {
+    "1": ("telegram", "Download the Telegram message(s) the link points to"),
+    "2": ("channel", "Treat the link as a whole channel (batch download)"),
+    "3": ("rewrite", "Rewrite it into another link (for example a normal t.me link)"),
+    "4": ("ytdlp", "Download the page with yt-dlp"),
+}
+
+
+def print_rules(rules):
+    if not rules.rules:
+        print("\nNo custom link rules yet. Built-in Telegram links and other websites already work without rules.")
+        return
+    print("\n  #  ON  PRI  ID                 TARGET    PATTERN")
+    print("  " + "-" * 70)
+    for i, r in enumerate(rules.rules, start=1):
+        flag = "yes" if r.enabled and not r.error else (" ! " if r.error else "no ")
+        print(f"  {i:<2} {flag}  {r.priority:<4} {r.id[:18]:<18} {r.target:<9} {r.pattern}")
+        if r.error:
+            print(f"       problem: {r.error}")
+
+
+def pick_rule(rules, prompt):
+    raw = input(prompt).strip()
+    if raw.isdigit() and 1 <= int(raw) <= len(rules.rules):
+        return rules.rules[int(raw) - 1]
+    return rules.get(raw)
+
+
+def rule_wizard(rules):
+    print(RULE_HELP)
+    rid = input("Rule id (letters, digits, - or _; 0=Cancel): ").strip()
+    if not rid or rid == "0":
+        return
+    name = input("Name (optional): ").strip()
+    style = input("Pattern style: [1] template (easy)  [2] regex (advanced)  [1]: ").strip() or "1"
+    rtype = "regex" if style == "2" else "template"
+    pattern = input("Pattern: ").strip()
+    if not pattern:
+        return
+    print("What should matching links do?")
+    for key, (_, text) in TARGET_CHOICES.items():
+        print(f"  [{key}] {text}")
+    target = TARGET_CHOICES.get(input("Choice [1]: ").strip() or "1", TARGET_CHOICES["1"])[0]
+
+    channel_override = None
+    rewrite_to = None
+    if target in ("telegram", "channel"):
+        raw = input("Fixed channel id or username to always use (Enter = read it from the link): ").strip()
+        channel_override = parse_channel(raw) if raw else None
+    if target == "rewrite":
+        rewrite_to = input("Rewrite to (use {msg}, {channel}, {url} ...): ").strip()
+
+    prio_raw = input("Priority, higher runs first [100]: ").strip() or "100"
+    priority = int(prio_raw) if prio_raw.lstrip("-").isdigit() else 100
+
+    tests = []
+    example = input("Example link to test the rule (Enter = skip): ").strip()
+    if example:
+        tests.append({"input": example})
+
+    rule = LinkRule(id=rid, name=name, pattern=pattern, type=rtype, target=target,
+                    channel_override=channel_override, rewrite_to=rewrite_to, priority=priority, tests=tests)
+    try:
+        warnings = rules.add(rule)
+    except RuleError as exc:
+        print(f"\n[ERROR] Rule not saved: {exc}")
+        return
+    rules.save(PATHS.rules_file)
+    for w in warnings:
+        print(f"[WARNING] {w}")
+    print(f"\n✓ Rule '{rid}' saved.")
+    if example:
+        print("Result for your example:")
+        for line in route(example, rules, default_channel=STORE.load().default_channel).describe():
+            print("  " + line)
+
+
+def menu_rules():
+    while True:
+        console.clear()
+        console.print(BANNER)
+        console.print("[bold cyan]Link Rules - add your own supported links[/bold cyan]")
+        rules = load_rules()
+        print_rules(rules)
+        console.print("\n  [1] Add a rule")
+        console.print("  [2] Test a link")
+        console.print("  [3] Turn a rule on/off")
+        console.print("  [4] Delete a rule")
+        console.print("  [5] Export rules to a file")
+        console.print("  [6] Import rules from a file")
+        console.print("  [0] Back to Main Menu")
+        console.print("=" * 50)
+
+        choice = input("Enter choice (0-6): ").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            rule_wizard(rules)
+        elif choice == "2":
+            text = input("Paste a link to test: ").strip()
+            if text:
+                cfg = STORE.load()
+                result = route(text, rules, default_channel=cfg.default_channel,
+                               ytdlp_enabled=cfg.ytdlp.enabled, range_cap=cfg.range_cap)
+                print()
+                for line in result.describe() or ["nothing recognised"]:
+                    print("  " + line)
+        elif choice == "3":
+            rule = pick_rule(rules, "Rule number or id: ")
+            if rule is None:
+                print("[ERROR] No such rule.")
+            else:
+                rules.set_enabled(rule.id, not rule.enabled)
+                rules.save(PATHS.rules_file)
+                print(f"Rule '{rule.id}' is now {'ON' if rule.enabled else 'OFF'}.")
+        elif choice == "4":
+            rule = pick_rule(rules, "Rule number or id to delete: ")
+            if rule is None:
+                print("[ERROR] No such rule.")
+            elif yes(input(f"Delete rule '{rule.id}'? (Y/N): ")):
+                rules.remove(rule.id)
+                rules.save(PATHS.rules_file)
+                print("Deleted.")
+        elif choice == "5":
+            target = input("Save to file [link_rules_export.json]: ").strip() or "link_rules_export.json"
+            try:
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write(rules.export_text())
+                print(f"✓ Exported {len(rules.rules)} rule(s) to {os.path.abspath(target)}")
+            except OSError as exc:
+                print(f"[ERROR] {exc}")
+        elif choice == "6":
+            source = input("Rules file to import: ").strip()
+            try:
+                with open(source, "r", encoding="utf-8") as fh:
+                    added, problems = rules.import_text(fh.read(), replace=yes(input("Replace rules with the same id? (Y/N): ")))
+                rules.save(PATHS.rules_file)
+                print(f"✓ Imported {added} rule(s).")
+                for p in problems:
+                    print(f"[WARNING] {p}")
+            except OSError as exc:
+                print(f"[ERROR] {exc}")
+        else:
+            print("[ERROR] Invalid choice.")
+        input("\nPress Enter to continue...")
+
+
+# ---------------------------------------------------------------------
+# Menu: settings and diagnostics
+# ---------------------------------------------------------------------
+
+def print_diagnostics(run_benchmark=False):
+    cfg = STORE.load()
+    rows = diagnostics.collect(PATHS, cfg, run_benchmark=run_benchmark)
+    width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        print(f"  {label:<{width}} : {value}")
+
+
+def menu_settings():
+    while True:
+        cfg = STORE.load()
+        console.clear()
+        console.print(BANNER)
+        console.print("[bold cyan]Settings & Diagnostics[/bold cyan]  (saved to .env)")
+        print(f"  [1] Download folder            : {cfg.downloads_path(PATHS)}")
+        print(f"  [2] Max total size per batch   : {cfg.max_total_size_bytes / GB:.1f} GB")
+        print(f"  [3] Files downloaded at once   : {cfg.max_concurrent_files}")
+        print(f"  [4] Connections per file       : {cfg.parallel_connections}")
+        print(f"  [5] Default channel (CHANNEL_ID): {cfg.default_channel if cfg.default_channel is not None else '-'}")
+        print(f"  [6] Other sites via yt-dlp     : {'on' if cfg.ytdlp.enabled else 'off'}")
+        print(f"  [7] yt-dlp max video height    : {cfg.ytdlp.max_height or 'no limit'}")
+        print(f"  [8] yt-dlp cookies file        : {cfg.ytdlp.cookies_file or '-'}")
+        print("  [9] Diagnostics (speed test)")
+        print("  [0] Back to Main Menu")
+        print("=" * 50)
+
+        choice = input("Enter choice (0-9): ").strip()
+        if choice == "0":
+            return
+        updates = {}
+        try:
+            if choice == "1":
+                raw = input("New download folder (Enter = default): ").strip()
+                updates["DOWNLOADS_DIR"] = raw
+            elif choice == "2":
+                updates["MAX_TOTAL_SIZE"] = str(int(float(input("Max GB per batch: ").strip()) * GB))
+            elif choice == "3":
+                updates["MAX_CONCURRENT_FILES"] = str(max(1, min(8, int(input("Files at once (1-8): ").strip()))))
+            elif choice == "4":
+                updates["PARALLEL_CONNECTIONS"] = str(max(1, min(16, int(input("Connections per file (1-16): ").strip()))))
+            elif choice == "5":
+                updates["CHANNEL_ID"] = input("Default channel id or username (Enter = none): ").strip()
+            elif choice == "6":
+                updates["YTDLP_ENABLED"] = "0" if cfg.ytdlp.enabled else "1"
+            elif choice == "7":
+                updates["YTDLP_MAX_HEIGHT"] = str(max(0, int(input("Max height in pixels (0 = no limit): ").strip())))
+            elif choice == "8":
+                updates["YTDLP_COOKIES"] = input("Path to cookies.txt (Enter = none): ").strip()
+            elif choice == "9":
+                print()
+                with console.status("Testing AES speed..."):
+                    print_diagnostics(run_benchmark=True)
+                input("\nPress Enter to continue...")
+                continue
+            else:
+                print("[ERROR] Invalid choice.")
+                input("\nPress Enter to continue...")
+                continue
+        except ValueError:
+            print("[ERROR] That is not a valid number.")
+            input("\nPress Enter to continue...")
+            continue
+        STORE.update_values(updates)
+
+
+# ---------------------------------------------------------------------
+# Main menu
+# ---------------------------------------------------------------------
+
+async def main():
+    session = TelegramSession(PATHS, STORE)
+    try:
+        while True:
+            cfg = STORE.load()
+            try:
+                os.makedirs(cfg.downloads_path(PATHS), exist_ok=True)
+            except OSError:
+                pass
+
+            console.clear()
+            console.print(BANNER)
+            console.print("[bold green]==================================================[/bold green]")
+            console.print(f"[bold white] Telegram Private Downloader ({APP_VERSION})[/bold white]")
+            console.print("[bold green]==================================================[/bold green]")
+            console.print("Select Download Mode:")
+            console.print("  [1] My Account")
+            console.print("  [2] Download ALL videos from channel (Batch Mode)")
+            console.print("  [3] Download SPECIFIC video(s) by Link (Telegram or other sites)")
+            console.print("  [4] Download SPECIFIC file(s)/document(s) by Link")
+            console.print("  [5] Link Rules (add your own supported links)")
+            console.print("  [6] Settings & Diagnostics")
+            console.print("  [7] Exit")
+            console.print("=" * 50)
+
+            mode = input("Enter choice (1-7): ").strip()
+
+            if mode == "7":
+                console.print("\n[bold yellow]Exiting downloader. Goodbye![/bold yellow]\n")
+                break
+            elif mode == "1":
+                await menu_account(session)
+            elif mode == "2":
+                await menu_batch(session)
+            elif mode == "3":
+                await menu_links(session, video_mode=True)
+            elif mode == "4":
+                await menu_links(session, video_mode=False)
+            elif mode == "5":
+                menu_rules()
+            elif mode == "6":
+                menu_settings()
+            else:
+                console.print("[bold red][ERROR] Invalid choice. Please enter a number from 1 to 7.[/bold red]")
+                input("\nPress Enter to return to main menu...")
+    finally:
+        await session.close()
+
+
+# ---------------------------------------------------------------------
+# Command line switches
+# ---------------------------------------------------------------------
+
+USAGE = f"""Telegram Downloader {APP_VERSION}
+
+  python downloader.py                 interactive menu
+  python downloader.py --parse TEXT    show what links in TEXT mean (no login needed)
+  python downloader.py --diag          show versions, AES speed backend, folders
+  python downloader.py --version
+"""
+
+
+def cli_parse(text):
+    cfg = STORE.load()
+    result = route(text, load_rules(), default_channel=cfg.default_channel,
+                   ytdlp_enabled=cfg.ytdlp.enabled, range_cap=cfg.range_cap)
+    for line in result.describe() or ["nothing recognised"]:
+        print(line)
+    return 0 if not result.empty else 1
+
+
+def handle_switches(argv):
+    """Returns an exit code when a switch was handled, None to start the menu."""
+    if not argv:
+        return None
+    head = argv[0]
+    if head in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    if head == "--version":
+        print(APP_VERSION)
+        return 0
+    if head == "--diag":
+        print_diagnostics(run_benchmark=True)
+        return 0
+    if head == "--parse":
+        return cli_parse(" ".join(argv[1:]))
+    print(f"Unknown option: {head}\n")
+    print(USAGE)
+    return 2
+
 
 if __name__ == "__main__":
+    code = handle_switches(sys.argv[1:])
+    if code is not None:
+        sys.exit(code)
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
@@ -1140,6 +938,3 @@ if __name__ == "__main__":
             input("Press Enter to exit...")
         else:
             raise e
-
-
-

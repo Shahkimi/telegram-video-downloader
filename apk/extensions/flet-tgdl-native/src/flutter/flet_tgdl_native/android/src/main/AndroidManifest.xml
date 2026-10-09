@@ -1,0 +1,48 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.shahkimi.tgdl.nativeext">
+
+    <!-- Receives "Share", "Select text > Download" and "Open with" for Telegram links. Stores the text, opens the app. -->
+    <application>
+        <activity
+            android:name=".ShareTargetActivity"
+            android:exported="true"
+            android:label="Download with TG Downloader"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+
+            <!-- Share sheet: any app that shares plain text (Chrome, YouTube, Telegram "Copy link" is not a share) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Select some text anywhere, then pick "Download with TG Downloader" in the selection menu -->
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Telegram web links. Android 12+ needs the user to switch this on:
+                 Settings > Apps > TG Downloader > Open by default > Add link. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="t.me" />
+                <data android:host="telegram.me" />
+                <data android:host="telegram.dog" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

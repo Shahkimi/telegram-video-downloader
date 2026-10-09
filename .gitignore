@@ -20,3 +20,21 @@ __pycache__/
 *.pyd
 .pytest_cache/
 scratch/
+
+# Android app build (apk/) and local-only data
+a/
+.cache/
+apk/.venv/
+apk/build/
+apk/.flet/
+.venv/
+*.part
+*.ytdl
+config.json
+link_rules.json
+*.jks
+*.keystore
+key.properties
+*.apk
+*.aab
+apk/.wheels/

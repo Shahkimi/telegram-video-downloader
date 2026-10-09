@@ -2,7 +2,8 @@
 
 > **Developed by:** PARVEJ  
 > **License:** MIT Open Source  
-> **Language:** Python 3.8+
+> **Language:** Python 3.10+  
+> **Also available:** an [Android app](apk/README.md) built on the same engine
 
 An advanced, beginner-friendly interactive CLI tool to download videos, documents, images, PDFs, archives, and files from Telegram private channels, groups, and public channels with live progress tracking.
 
@@ -23,7 +24,11 @@ An advanced, beginner-friendly interactive CLI tool to download videos, document
   - **Option [4] General File/Document Download by Link**: Download non-video files (PDF, PNG, JPG, DOCX, PPTX, TXT, ZIP, RAR, MP3, etc.).
   - **Range Link Support**: Download ranges like `t.me/c/1234567890/10-25` or space-separated multiple links.
 - 📊 **Real-time Live Progress Bar**: Shows current queue index, filename, download speed (MB/s), completion percentage, and estimated time remaining (ETA).
-- 📂 **Automatic Download Folder**: Automatically saves all files to `C:\Users\USER\Downloads\Telegram Downloads`.
+- 🌐 **Videos from other websites**: YouTube, TikTok, Instagram, X and hundreds more through [yt-dlp](https://github.com/yt-dlp/yt-dlp), right from the same link prompt.
+- ➕ **Add your own supported links**: define link formats (mirrors, wrapper sites, bots) as rules and the downloader understands them. See [Link Rules](#5️⃣-option-5-link-rules).
+- ⚡ **Fast and fault-tolerant**: parallel connections per file, several files at once, `.part` files that are only renamed when the size matches, retries.
+- 📱 **Android app**: the same downloader on your phone, with share-to-download. See [`apk/README.md`](apk/README.md).
+- 📂 **Automatic Download Folder**: Automatically saves all files to `C:\Users\USER\Downloads\Telegram Downloads` (change it in Settings).
 
 ---
 
@@ -31,7 +36,7 @@ An advanced, beginner-friendly interactive CLI tool to download videos, document
 
 Before running the tool, make sure you have:
 
-1. **Python 3.8 or higher** installed on your system.  
+1. **Python 3.10 or higher** installed on your system.  
    - Download Python: [https://www.python.org/downloads/](https://www.python.org/downloads/)
    - **Important during installation**: Check the box **"Add Python to PATH"**.
 
@@ -73,6 +78,8 @@ You can launch the tool in **one click**:
 - **On Windows**: Simply double-click **`start.bat`** (or run `.\start` in PowerShell/CMD).
 - **On Linux / Mac**: Run `python downloader.py` in your terminal.
 
+Optional: install [`ffmpeg`](https://ffmpeg.org/download.html) (and Node.js) if you want the best quality from YouTube and similar sites; without them the downloader falls back to ready-made single files.
+
 ---
 
 ## 🎮 How to Use the Interactive Menu
@@ -86,11 +93,13 @@ When you start the tool, you will see the Main Menu:
 Select Download Mode:
   [1] My Account
   [2] Download ALL videos from channel (Batch Mode)
-  [3] Download SPECIFIC video(s) by Post/Message Link
+  [3] Download SPECIFIC video(s) by Link (Telegram or other sites)
   [4] Download SPECIFIC file(s)/document(s) by Link
-  [5] Exit
+  [5] Link Rules (add your own supported links)
+  [6] Settings & Diagnostics
+  [7] Exit
 ==================================================
-Enter choice (1-5): 
+Enter choice (1-7): 
 ```
 
 ### 1️⃣ Option [1]: My Account
@@ -104,18 +113,46 @@ Enter choice (1-5):
 
 ### 3️⃣ Option [3]: Download SPECIFIC Video(s) by Link
 - Paste single video post links, range links (`https://t.me/c/12345/10-20`), or multiple space-separated links.
+- Also understood: `t.me/username/123`, `/s/` links, forum-topic links, `web.telegram.org` links, `tg://` links, and bare message numbers when a default channel is set.
+- Paste a link from another website (YouTube, TikTok, X, ...) and it is downloaded with yt-dlp.
 - Confirms detected videos and downloads them with a live progress bar.
 
 ### 4️⃣ Option [4]: Download SPECIFIC File(s)/Document(s) by Link
 - Paste links for non-video files (PDF, PNG, JPG, DOCX, ZIP, PPT, TXT, etc.).
 - Detects documents and downloads them to your download folder.
 
+### 5️⃣ Option [5]: Link Rules
+
+Teach the downloader about link formats it does not know. A rule says "links that look like *this* mean *that*":
+
+| Action | Example pattern | What it does |
+|---|---|---|
+| Download Telegram messages | `mysite.com/{channel}/{msg}` | `https://mysite.com/durov/12-14` downloads messages 12 to 14 of `durov` |
+| Open as a whole channel | `mysite.com/channel/{channel}` | offers the channel for a batch scan |
+| Rewrite into another link | `go.example/{*}/{msg}` rewritten to `https://t.me/mychannel/{msg}` | converts the link, then reads it again |
+| Download with yt-dlp | `videos.example/{**}` | hands the page to yt-dlp |
+
+Placeholders: `{channel}` `{username}` `{cid}` `{peer}` `{msg}` `{topic}` `{*}` (one path segment) `{**}` (anything). Advanced users can pick the regex style with named groups.
+The menu lets you **add** (with a guided wizard that tests your example link), **test** any link, **turn on/off**, **delete**, **export** and **import** rules. Rules are stored in `link_rules.json` next to `downloader.py` (not committed), and the Android app can import the same file.
+
+Quick check without logging in: `python downloader.py --parse "https://t.me/c/123/10-12"`.
+
+### 6️⃣ Option [6]: Settings & Diagnostics
+Download folder, size budget, files at once, connections per file, default channel, yt-dlp switch and maximum video height, plus a diagnostics screen (`python downloader.py --diag`) that shows library versions, the AES backend and a quick speed test.
+
+---
+
+## 📱 Android App
+
+The `apk/` folder contains the same downloader as an Android app (login, batch download, links, files, link rules, share-to-download, background downloads). Download the APK from the Releases page or build it yourself; see [`apk/README.md`](apk/README.md) for installation, usage and build instructions.
+
 ---
 
 ## 🔒 Security & Privacy Notice
 
 - **No Secrets Tracked**: `.env` and `*.session` files are listed in `.gitignore` to prevent sensitive credentials from ever being uploaded.
-- **Local Execution**: All session data and credentials stay on your local computer.
+- **Local Execution**: All session data and credentials stay on your local computer (or in the Android app's private storage).
+- **Credentials are never logged**: codes, passwords and the API hash are kept out of the log files.
 
 ---
 

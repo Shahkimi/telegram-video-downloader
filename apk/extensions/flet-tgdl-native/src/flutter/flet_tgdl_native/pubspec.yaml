@@ -1,0 +1,22 @@
+name: flet_tgdl_native
+description: Android share target, keep-alive foreground service, media scan and permission helpers for TG Downloader.
+version: 3.0.0
+publish_to: none
+
+environment:
+  sdk: '>=3.2.3 <4.0.0'
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # `flet build` pins the real version through dependency_overrides, so any 1.x release resolves here.
+  flet: ">=1.0.0 <2.0.0"
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: io.github.shahkimi.tgdl.nativeext
+        pluginClass: TgdlNativePlugin

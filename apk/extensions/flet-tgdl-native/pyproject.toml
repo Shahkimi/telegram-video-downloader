@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flet-tgdl-native"
+version = "3.0.0"
+description = "Android helpers for TG Downloader: share target, keep-alive foreground service, media scan, permissions."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["flet==1.0.3"]
+
+# Python half of the extension.
+[tool.hatch.build.targets.wheel]
+packages = ["src/flet_tgdl_native"]
+
+# Flutter half. `flet build` looks for top-level `flutter/<package>/pubspec.yaml` inside installed Python packages.
+[tool.hatch.build.targets.wheel.force-include]
+"src/flutter" = "flutter"

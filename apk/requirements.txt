@@ -1,5 +1,6 @@
+flet==1.0.3
 telethon>=1.45,<2
-cryptg>=0.4
-rich>=13
 yt-dlp>=2026.8.19
 certifi
+rich>=13
+cryptg>=0.4

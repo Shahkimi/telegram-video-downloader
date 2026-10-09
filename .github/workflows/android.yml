@@ -1,0 +1,158 @@
+name: Android APK
+
+# Push a tag such as v3.0.0 to build the APK and attach it to a GitHub Release.
+# Run it by hand from the Actions tab to get a test APK as a downloadable artifact (no release is created).
+# Every push to the android-app branch also builds a test APK artifact.
+on:
+  push:
+    tags: ["v*"]
+    branches: ["android-app"]
+    paths:
+      - "apk/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # creating the release and uploading the APK needs this
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: apk
+
+jobs:
+  test:
+    name: Tests and secrets check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: apk/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - run: python scripts/check_no_secrets.py
+
+  apk:
+    name: Build APK
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: apk/requirements-dev.txt
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Flet downloads Flutter, its own JDK and a Python build on first use. Keep them between runs.
+      - name: Cache Flet toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/flutter
+            ~/java
+            ~/.flet
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+          key: flet-1.0.3-${{ runner.os }}-${{ hashFiles('apk/pyproject.toml', 'apk/extensions/**/pubspec.yaml', 'apk/extensions/**/build.gradle') }}
+          restore-keys: |
+            flet-1.0.3-${{ runner.os }}-
+
+      - run: pip install -r requirements-dev.txt
+
+      # pyaes (a Telethon dependency) only exists as a source archive and the build accepts wheels only.
+      - name: Build pyaes wheel
+        run: echo "PIP_FIND_LINKS=$(python scripts/prepare_wheels.py)" >> "$GITHUB_ENV"
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=$([[ "$tag" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            base="${tag#v}"; base="${base%%-*}"
+            echo "name=${base}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "name=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Optional: with the four secrets below the APK is signed with your own key, so every release can update the
+      # previous one. Without them it gets a debug signature (fine for testing, not for updates).
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            {
+              echo "FLET_ANDROID_SIGNING_KEY_STORE=$RUNNER_TEMP/upload.jks"
+              echo "FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "FLET_ANDROID_SIGNING_KEY_PASSWORD=$KEY_PASSWORD"
+              echo "FLET_ANDROID_SIGNING_KEY_ALIAS=$KEY_ALIAS"
+            } >> "$GITHUB_ENV"
+            echo "Signing with the configured keystore"
+          else
+            echo "::warning::No signing secrets set. The APK is signed with a debug key."
+          fi
+
+      - name: flet build apk
+        env:
+          PYTHONUTF8: "1"
+          FLET_CLI_NO_RICH_OUTPUT: "1"
+        run: >
+          flet build apk --yes --python-version 3.13
+          --build-version "${{ steps.version.outputs.name }}"
+          --build-number "${{ github.run_number }}"
+
+      - name: Check the APK for secrets
+        run: python scripts/check_no_secrets.py --apk build/apk/tg-downloader.apk
+
+      - name: Name the file
+        id: apk
+        run: |
+          label="${{ steps.version.outputs.tag }}"
+          label="${label:-${{ steps.version.outputs.name }}-build${{ github.run_number }}}"
+          file="tg-downloader-${label}.apk"
+          cp build/apk/tg-downloader.apk "build/apk/${file}"
+          (cd build/apk && sha256sum "${file}" | tee "${file}.sha256")
+          echo "file=apk/build/apk/${file}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tg-downloader-apk
+          path: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: true

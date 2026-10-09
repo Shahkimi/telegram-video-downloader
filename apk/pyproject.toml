@@ -1,0 +1,64 @@
+[project]
+name = "tgdl"
+version = "3.0.0"
+description = "Telegram and web video downloader: CLI core plus Android app"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "flet==1.0.3",
+    "telethon>=1.45,<2",
+    "yt-dlp>=2026.8.19",
+    "certifi",
+]
+
+[project.optional-dependencies]
+cli = ["rich>=13", "cryptg>=0.4"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "flet-cli==1.0.3", "flet-desktop==1.0.3"]
+
+# ---------------------------------------------------------------------
+# flet build apk   (run from this folder; only ./src is packaged)
+# ---------------------------------------------------------------------
+[tool.flet]
+org = "io.github.shahkimi"
+product = "TG Downloader"
+company = "Shahkimi"
+copyright = "MIT License"
+artifact = "tg-downloader"
+
+[tool.flet.app]
+path = "src"
+module = "main"
+
+[tool.flet.android]
+min_sdk_version = 24
+# arm64 covers practically every phone made since 2017 and keeps the APK near 45 MB instead of 130 MB.
+# Build for older 32-bit phones with: flet build apk --arch armeabi-v7a
+target_arch = ["arm64-v8a"]
+extract_packages = ["certifi"]
+dependencies = ["flet-tgdl-native"]
+
+[tool.flet.android.manifest_application]
+allowBackup = "false"
+# Android 10 only: lets the app write to Download/ with WRITE_EXTERNAL_STORAGE. Ignored on Android 11+.
+requestLegacyExternalStorage = "true"
+
+[tool.flet.android.permission]
+"android.permission.WRITE_EXTERNAL_STORAGE" = { maxSdkVersion = "29" }
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.WAKE_LOCK" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
+"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" = true
+
+[tool.flet.dev_packages]
+flet-tgdl-native = "extensions/flet-tgdl-native"
+
+# Flet's build template pins jni to 1.0.0, but the newest jni_flutter (pulled in by path_provider_android) needs
+# jni >= 1.1 and breaks the Dart compile. 1.0.1 is the last release that works with jni 1.0.x.
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni_flutter = "1.0.1"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
